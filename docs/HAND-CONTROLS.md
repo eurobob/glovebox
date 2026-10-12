@@ -76,8 +76,10 @@ The default cache is `~/Library/Application Support/Glovebox`; use `--glovebox-h
 elsewhere. Preparation reuses `alyx/pipelines.foz` and the matching version's translated game libraries
 at `source/<VERSION>/klepton/visionos/build/glovebox-guest/`, including `libs.txt`.
 
-When upgrading a prepared fork from an older kit, existing translations can be reused only if the
-translator is byte-identical. Otherwise, explicitly pass `--retranslate`: it reads the existing
+When upgrading a prepared fork from an older kit, existing translations can be reused if the
+translator is byte-identical or matches the helper's verified 0.1.1/0.1.5 binary pair. That pair differs
+only in UUID, code signature and debug object paths/timestamps; its program bytes are identical.
+Otherwise, explicitly pass `--retranslate`: it reads the existing
 `alyx/linux/game` and `alyx/sysroot` libraries and generates separate output under the ignored
 `build/hand-controls/guest-<VERSION>-<translator hash>/` directory. It does not redownload headset
 game assets or modify the original cache. The guest link changes only after translation succeeds.

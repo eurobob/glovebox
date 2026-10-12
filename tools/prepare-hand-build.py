@@ -35,6 +35,25 @@ def digest(path):
     return value.hexdigest()
 
 
+# These exact 0.1.1/0.1.5 release translators were compared byte-for-byte.
+# The only differences are LC_UUID, the LC_CODE_SIGNATURE blob, and four
+# N_OSO debug object paths/timestamps (klepton_ld, kl_x18, kl_env, kl_guestpatch).
+# Masking those ten regions yields the same full-file SHA-256 on both:
+# 228cfb27fad3aafc6efbdb0d1961e0fcc7d53267d0649d349e8cc52886d667dc.
+# Every remaining byte, including bindings and non-debug symbols, is identical;
+# translator inputs, mkguest and ldwrap sources also match v0.1.1/v0.1.5.
+# This immutable pair is the sole exception; unknown builds must retranslate.
+VERIFIED_EQUIVALENT_TRANSLATORS = frozenset({
+    "83ad595398f0031af00ad621da0cfcf35c9f8084795568001986608198e9e0fb",
+    "5e58e8f3fe7ca700d3faadc5e9b115975ab336ebf7c007dff7a1880380d3eb3c",
+})
+
+
+def translators_equivalent(first, second):
+    a, b = digest(first), digest(second)
+    return a == b or frozenset((a, b)) == VERIFIED_EQUIVALENT_TRANSLATORS
+
+
 def translated_guest(root, kit):
     return root / "build/hand-controls" / f"guest-{kit_version(kit)}-{digest(kit / 'bin/klepton-ld')[:12]}"
 
@@ -82,7 +101,7 @@ def cached_assets(root, home, kit_override=None, retranslate=False):
     replace_guest = None
     if not source_guest.exists():
         # Reuse only the existing link to the original installer's guest. A
-        # byte-identical translator permits using its completed translations
+        # byte-identical or verified equivalent translator permits reusing translations
         # with a newer runtime kit. A changed translator needs separate output.
         original_version = kit_version(original_kit)
         original_guest = home / "source" / original_version / "klepton/visionos/build/glovebox-guest"
@@ -91,7 +110,7 @@ def cached_assets(root, home, kit_override=None, retranslate=False):
             source_guest = owned_guest
         elif not guest.is_symlink() or guest.resolve() != original_guest.resolve():
             raise ValueError(f"Missing {source_guest}; no existing symlink to the original cached guest to reuse")
-        elif digest(kit / "bin/klepton-ld") == digest(original_kit / "bin/klepton-ld"):
+        elif translators_equivalent(kit / "bin/klepton-ld", original_kit / "bin/klepton-ld"):
             source_guest = original_guest
         elif retranslate:
             translation_inputs(root, cache)
