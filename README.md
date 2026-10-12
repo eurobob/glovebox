@@ -6,9 +6,12 @@
 It runs on the headset itself: no PC, no streaming. Glovebox builds it on your Mac from the copy you own and
 installs it on your headset.
 
-This fork adds **experimental hand controls** alongside PS VR2 Sense. Choose **Hands (Experimental)**
-or **PS VR2 Sense** in the headset launcher; Hands is the default. Hand controls have not yet been
-validated in hardware gameplay. Upstream Glovebox remains Sense-only.
+This fork is based on **upstream Glovebox 0.1.5** and adds **experimental hand controls** alongside
+PS VR2 Sense. Choose **Hands (Experimental)** or **PS VR2 Sense** in the headset launcher; Hands is the default.
+Individual finger articulation was confirmed on the headset in build 1012.23.1, but a visible 90° hand
+rotation and translation offset fixed relative to the room remain reported. Build 1012.24.1 adds the
+OpenVR support for placing the hand skeleton; its effect on those issues still needs a headset playtest.
+Upstream Glovebox remains Sense-only.
 [Hand controls and custom build instructions](docs/HAND-CONTROLS.md).
 
 ## You need
@@ -22,7 +25,7 @@ validated in hardware gameplay. Upstream Glovebox remains Sense-only.
 ## Install
 
 For this fork, follow the [custom build and update guide](docs/HAND-CONTROLS.md#build-and-update-this-fork).
-It reuses your original Glovebox build's cached game files and runtime kit. Install with the same
+It reuses your cached game files with a runtime kit matching 0.1.5. Install with the same
 team and bundle ID to preserve game data and saves; **do not uninstall the existing app**.
 
 ### Original Glovebox (Sense controllers)
@@ -38,6 +41,10 @@ fork with the upstream Sense-only build. Use the custom build guide to retain ha
 
 <details>
 <summary>Upstream's standard Terminal workflow</summary>
+
+`build` needs the runtime kit and your game files. From a checkout, build the kit once with
+`brew install cmake && zsh engine/kit/build-kit.sh glovebox-kit` (it lands where `build` looks). The game files come
+from the Mac app's download, or from `GLOVEBOX_GAME` pointing at a copy of the game's `game/` folder.
 
 ```sh
 xcrun python3 engine/glovebox.py doctor    # what this Mac and headset still need

@@ -16,4 +16,4 @@
 | The download slows down, or progress appears unchanged | With the headset off | Background transfers depend on the system's scheduling. Open Glovebox: HLA again to unpack the downloaded chunks and finish; the progress bar counts unpacked game data. |
 | The download needs more free space | Resuming a partial download | This fork reuses completed files and background chunks, and checks the additional space needed plus unpacking headroom. After freeing space, press **Install** or **Resume** to check again. Deleting the app also deletes the partial download. |
 
-Something not listed? Press **Copy diagnostics** in the Mac app and [open an issue](https://github.com/glovebox-vr/glovebox/issues/new).
+Something not listed? Press **Copy diagnostics** in the Mac app (or, for a problem in the game, **Share Diagnostics** in the headset app's menu under your name) and [open an issue](https://github.com/glovebox-vr/glovebox/issues/new).

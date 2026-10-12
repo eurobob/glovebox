@@ -1,7 +1,10 @@
 # Experimental hand controls
 
-This fork adds hand controls to Glovebox. **Experimental: two headset playtests exposed poor articulation, jitter and unreliable movement.
-Build 1012.23.1 replaces controller-style finger animation with tracked joints; headset acceptance is still pending.**
+This fork adds hand controls to **upstream Glovebox 0.1.5**. **Experimental: headset playtests confirmed
+individual finger articulation in build 1012.23.1, but still showed a visible 90° hand rotation and a
+translation offset fixed relative to the room.** Earlier tests also exposed jitter and unreliable movement.
+Build 1012.24.1 supports OpenVR pose queries for skeletal actions so the game can request the skeleton's
+placement as well as its finger bones. The resulting visual alignment has not yet been confirmed on hardware.
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.
@@ -55,7 +58,7 @@ center. Moving outside the dead zone cancels the hold-to-click action for that p
 - Trigger and grip are on/off controls, not analog pressure. Hands have no controller haptics.
   Tracking can fail when fingers overlap, leave view, or are hidden by the other hand or an object.
 - Menu, Y-on-release and stick-click gestures produce one short press per gesture, without repeating
-  while held. Aim, throwing, movement, teleporting and gameplay interactions still need headset testing.
+  while held. Reliable aim, throwing, movement, teleporting and gameplay interactions still need further headset testing.
 
 ## Build and update this fork
 
@@ -63,20 +66,28 @@ Use an Apple silicon Mac with Xcode, visionOS support, at least 100 GiB free, an
 Developer Program team** as the installed app. The current helper is configured for paid-team
 signing; it does not yet support the upstream Personal Team workflow.
 
-This workflow requires an original Glovebox Mac build matching this checkout's `VERSION`; it is not
-a first-time game downloader. Under `~/Library/Application Support/Glovebox`, it reuses:
+This is an update workflow using the original Mac installer's cached Steam files, not a first-time
+game downloader. The runtime kit must match this checkout's `VERSION`, currently **0.1.5**. Select it
+with `--kit PATH`, or place it at `build/hand-controls/upstream-0.1.5/kit`. Without `--kit`, the helper
+prefers `build/hand-controls/upstream-<VERSION>/kit`, then falls back to the original cached
+`alyx/kit` only if its version matches. An older kit is rejected.
 
-- `alyx/kit/KIT.json` and its runtime kit
-- `alyx/pipelines.foz`
-- `source/<VERSION>/klepton/visionos/build/glovebox-guest/libs.txt` and its translated game libraries
+The default cache is `~/Library/Application Support/Glovebox`; use `--glovebox-home PATH` if it lives
+elsewhere. Preparation reuses `alyx/pipelines.foz` and the matching version's translated game libraries
+at `source/<VERSION>/klepton/visionos/build/glovebox-guest/`, including `libs.txt`.
 
-Pass `--glovebox-home PATH` to preparation if that cache lives elsewhere. The helper links to the
-existing translations, stages generated files in ignored directories, and preserves the original
-signed app as a rollback candidate. Keep downloaded game assets, generated binaries and build
-output out of Git.
+When upgrading a prepared fork from an older kit, existing translations can be reused only if the
+translator is byte-identical. Otherwise, explicitly pass `--retranslate`: it reads the existing
+`alyx/linux/game` and `alyx/sysroot` libraries and generates separate output under the ignored
+`build/hand-controls/guest-<VERSION>-<translator hash>/` directory. It does not redownload headset
+game assets or modify the original cache. The guest link changes only after translation succeeds.
+This upgrade path expects the previous preparation's guest symlink and refuses to replace unrelated folders.
+
+The original signed app remains a rollback candidate. Keep downloaded game assets, generated
+binaries and build output out of Git.
 
 Preparation also compiles the small OpenVR shim and replaces only its coalesced object in the staged
-Alyx archive. It leaves the original cached kit, other runtime objects and game translations untouched.
+Alyx archive. It leaves the selected source kit, other runtime objects and original game translations untouched.
 Vulkan headers must exist in the Klepton vendor output or the Homebrew vulkan-headers include directory.
 `tools/patch-hand-runtime.py` checks kit/source ABI headers and reuses a content-hashed compiled object.
 
@@ -92,6 +103,16 @@ visionos-cli-deploy --root . \
   --device DEVICE --no-launch
 ```
 
+For an upgrade that needs new translations, prepare with the matching kit and `--retranslate`, then
+run the same deploy command above:
+
+```sh
+python3 tools/prepare-hand-build.py --team TEAM --kit /path/to/0.1.5/kit --retranslate
+```
+
+Later preparations reuse the completed output after checking its input receipt; omit `--retranslate`
+on those runs.
+
 Replace `TEAM` with your Apple development team ID and `<lowerteam>` with that ID in lowercase;
 the angle brackets are placeholders, not part of the command. The preparation script also accepts
 `--build-number NUMBER` for an explicit build stamp. The deploy command builds, signs and installs;
@@ -101,8 +122,9 @@ the angle brackets are placeholders, not part of the command. The preparation sc
 its container, including downloaded game files and saves. This fork keeps the existing game/save
 paths and Steam sign-in flow. A different bundle ID installs a separate app with separate data.
 
-The original Mac Glovebox app's **Update** or **Renew** returns you to upstream Sense-only controls.
-Repeat the custom preparation and deployment above to update or renew this fork instead.
+The original Mac Glovebox app's **Install Update** or **Renew** returns you to upstream Sense-only
+controls. This fork's **Upstream Update** notice explains the custom rebuild; it does not install an
+update. Repeat the preparation and deployment above to update or renew this fork instead.
 
 The game still runs locally on Vision Pro using its ARM64 Linux build through Klepton. Wine is not
 required, and this repository does not include Valve's game binaries or downloaded game assets.
