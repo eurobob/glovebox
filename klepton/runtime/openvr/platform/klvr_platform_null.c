@@ -5,7 +5,9 @@
 // from `klvr_null.vk_proc`, so a test can supply fakes and inspect the copy
 // the shim records.
 #include "klvr_platform_null.h"
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -40,10 +42,34 @@ void klvr_plat_head(double t, klvr_tracked *out) {
 
 void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
     (void)t;
+    if (klvr_null.hand_tracking_enabled && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) {
+        memset(out, 0, sizeof *out);
+        return;
+    }
     *out = klvr_null.hand[hand & 1];
 }
 
-void klvr_plat_controller(int hand, klvr_controller *out) { *out = klvr_null.ctl[hand & 1]; }
+void klvr_plat_controller(int hand, klvr_controller *out) {
+    if (klvr_null.hand_tracking_enabled && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) {
+        memset(out, 0, sizeof *out);
+        return;
+    }
+    *out = klvr_null.ctl[hand & 1];
+}
+
+int klvr_plat_hand_tracking_enabled(void) { return klvr_null.hand_tracking_enabled; }
+int klvr_plat_skeleton(int hand, float *bones, float *curl, float *splay) {
+    if (bones) memset(bones, 0, 31 * 7 * sizeof(float));
+    if (curl) memset(curl, 0, 5 * sizeof(float));
+    if (splay) memset(splay, 0, 4 * sizeof(float));
+    if (hand < 0 || hand > 1 || !klvr_null.hand_tracking_enabled || !klvr_null.skeleton[hand].valid) return 0;
+    double age = klvr_plat_now() - klvr_null.skeleton[hand].time;
+    if (!isfinite(age) || age < 0 || age > 0.15) return 0;
+    if (bones) memcpy(bones, klvr_null.skeleton[hand].bones, sizeof klvr_null.skeleton[hand].bones);
+    if (curl) memcpy(curl, klvr_null.skeleton[hand].curl, sizeof klvr_null.skeleton[hand].curl);
+    if (splay) memcpy(splay, klvr_null.skeleton[hand].splay, sizeof klvr_null.skeleton[hand].splay);
+    return 1;
+}
 
 void klvr_plat_haptic(int hand, float amplitude, float frequency, float seconds) {
     klvr_null.haptic_count[hand & 1]++;

@@ -13,6 +13,12 @@ typedef struct {
     klvr_tracked    head;
     klvr_tracked    hand[2];
     klvr_controller ctl[2];
+    int             hand_tracking_enabled;
+    struct {
+        int valid;
+        double time;
+        float bones[31 * 7], curl[5], splay[4];
+    } skeleton[2];
     int             stage_count;
     int             no_display;       // klvr_plat_presents() returns 0
     double          fixed_now;                 // 0 = real clock

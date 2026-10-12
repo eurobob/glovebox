@@ -1,7 +1,7 @@
 # Experimental hand controls
 
-This fork adds hand controls to Glovebox. **Experimental: the first headset playtest reached the game,
-but exposed intermittent tracking and missed menu clicks. The revised input needs another playtest.**
+This fork adds hand controls to Glovebox. **Experimental: two headset playtests exposed poor articulation, jitter and unreliable movement.
+Build 1012.23.1 replaces controller-style finger animation with tracked joints; headset acceptance is still pending.**
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.
@@ -12,8 +12,8 @@ Hands mode asks for ARKit hand-tracking permission at Play. If access is denied,
 ## Gestures
 
 Keep both hands visible to the headset. Separate your thumb and index finger before pinching to
-select. Aim the in-game hand pointer at a menu item, then pinch and release. For middle, ring and little finger pinches, keep the other two of those fingers open;
-this distinguishes a button press from a fist grip.
+select. Aim the in-game hand pointer at a menu item, then pinch and release. Middle pinch works with the other fingers relaxed or curled. For ring/little button pinches, keep the other
+two of middle/ring/little open to distinguish a button press from a fist grip.
 
 | Gesture | Controller input / intended action |
 | --- | --- |
@@ -32,6 +32,14 @@ captures your horizontal viewing direction. Move your hand relative to that cent
 center. Moving outside the dead zone cancels the hold-to-click action for that pinch.
 
 ## Tracking and limitations
+
+- All 25 wrist/finger joints from ARKit now feed Valve’s 31-bone skeleton, including its five helper bones.
+  Individual joint bends and finger spread are independent of trigger/grip buttons. ARKit supplies inferred
+  visual poses for occluded joints; those estimates are not used to press gesture buttons.
+- A palm-based pointer replaces the inherited Beat Saber/Sense pose correction. Bare hands bypass the
+  Sense pitch and Quest controller offsets. Adaptive filtering reduces stationary jitter and follows faster motion.
+- Index and middle pinches share the 39/44 mm thresholds and 20 ms debounce. A fingertip must lead the
+  alternatives by 3 mm before activation; ambiguous pinches stay neutral. Once selected, a pinch keeps ownership.
 
 - Each gesture tracks and rearms independently. A missing little-finger joint no longer disables
   index selection or freezes a tracked hand pose. After a control loses its own tracking, release
@@ -67,6 +75,11 @@ existing translations, stages generated files in ignored directories, and preser
 signed app as a rollback candidate. Keep downloaded game assets, generated binaries and build
 output out of Git.
 
+Preparation also compiles the small OpenVR shim and replaces only its coalesced object in the staged
+Alyx archive. It leaves the original cached kit, other runtime objects and game translations untouched.
+Vulkan headers must exist in the Klepton vendor output or the Homebrew vulkan-headers include directory.
+`tools/patch-hand-runtime.py` checks kit/source ABI headers and reuses a content-hashed compiled object.
+
 From this checkout, substitute the **same development team and bundle ID as the installed app**, and
 your Vision Pro's device identifier:
 
@@ -93,3 +106,11 @@ Repeat the custom preparation and deployment above to update or renew this fork 
 
 The game still runs locally on Vision Pro using its ARM64 Linux build through Klepton. Wine is not
 required, and this repository does not include Valve's game binaries or downloaded game assets.
+
+## Local validation
+
+`sh tools/tests/run_hand_skeleton.sh` verifies joint hierarchy, both-hand ALVR basis conversion, independent
+finger articulation, rigid-motion invariance and filtering. `sh tools/tests/run_hand_gestures.sh` exercises
+natural middle-pinches, arbitration, dropout and rearming. The OpenVR host suite (`make test` in
+`klepton/runtime/openvr`, with `VULKAN_INCLUDE` set) verifies actual skeletal API output, freshness and
+thread-safe snapshots. These checks do not prove visual alignment or comfort on the headset.

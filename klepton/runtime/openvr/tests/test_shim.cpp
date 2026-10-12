@@ -545,6 +545,76 @@ static void test_input() {
     CHECK(in->DecompressSkeletalBoneData(packed, need, vr::VRSkeletalTransformSpace_Parent, back, 31) == vr::VRInputError_None);
     CHECK(memcmp(back, live, sizeof back) == 0);
 
+    // Native articulation passes through independently of buttons and motion
+    // range; each hand and finger can differ without controller synthesis.
+    klvr_null.fixed_now = 100;
+    klvr_null.hand_tracking_enabled = 1;
+    vr::EVRSkeletalTrackingLevel level;
+    for (int h = 0; h < 2; h++) {
+        auto &tracked = klvr_null.skeleton[h];
+        tracked.valid = 1;
+        tracked.time = 99.9;
+        for (int b = 0; b < 31; b++) {
+            float *xf = tracked.bones + 7 * b;
+            xf[0] = 0.001f * (b + h); xf[1] = 0.002f * b; xf[2] = -0.003f * b;
+            xf[3] = 0; xf[4] = 0; xf[5] = 0; xf[6] = 1;
+        }
+        tracked.bones[12 * 7 + 3] = 0.6f;
+        tracked.bones[12 * 7 + 6] = 0.8f;
+        for (int f = 0; f < 5; f++) tracked.curl[f] = 0.1f * (f + h);
+        for (int f = 0; f < 4; f++) tracked.splay[f] = 0.2f * (f + h);
+        auto action = h ? skr : skl;
+        CHECK(in->GetSkeletalActionData(action, &sd, sizeof sd) == vr::VRInputError_None && sd.bActive);
+        CHECK(in->GetSkeletalTrackingLevel(action, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
+        CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_None);
+        CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithController, back, 31) == vr::VRInputError_None);
+        CHECK(memcmp(live, back, sizeof live) == 0);
+        for (int b = 0; b < 31; b++) {
+            const float *xf = tracked.bones + 7 * b;
+            CHECK(live[b].position.v[0] == xf[0] && live[b].position.v[1] == xf[1] && live[b].position.v[2] == xf[2]);
+            CHECK(live[b].orientation.x == xf[3] && live[b].orientation.y == xf[4] && live[b].orientation.z == xf[5] && live[b].orientation.w == xf[6]);
+        }
+        CHECK(in->GetSkeletalSummaryData(action, vr::VRSummaryType_FromDevice, &sum) == vr::VRInputError_None);
+        CHECK(memcmp(sum.flFingerCurl, tracked.curl, sizeof tracked.curl) == 0);
+        CHECK(memcmp(sum.flFingerSplay, tracked.splay, sizeof tracked.splay) == 0);
+        CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Model, vr::VRSkeletalMotionRange_WithoutController, model, 31) == vr::VRInputError_None);
+        // Auxiliary bones are children of root in Valve's hierarchy.
+        NEAR(model[27].position.v[0], tracked.bones[0] + tracked.bones[27 * 7]);
+        CHECK(in->GetSkeletalBoneDataCompressed(action, vr::VRSkeletalMotionRange_WithController, packed, sizeof packed, &need) == vr::VRInputError_None);
+        CHECK(in->DecompressSkeletalBoneData(packed, need, vr::VRSkeletalTransformSpace_Parent, back, 31) == vr::VRInputError_None);
+        CHECK(memcmp(back, live, sizeof back) == 0);
+    }
+
+    // Bare-hand poses already use the skeleton root; no Touch raw/grip/tip
+    // offsets may move either action poses or the tracked device pose.
+    CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pd, sizeof pd, rh) == vr::VRInputError_None);
+    NEAR(pd.pose.mDeviceToAbsoluteTracking.m[0][3], 0.2f);
+    NEAR(pd.pose.mDeviceToAbsoluteTracking.m[1][3], 1.2f);
+    NEAR(pd.pose.mDeviceToAbsoluteTracking.m[2][3], -0.3f);
+    vr::TrackedDevicePose_t tracked_poses[3];
+    iface<vr::IVRSystem>(vr::IVRSystem_Version)->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, tracked_poses, 3);
+    NEAR(tracked_poses[2].mDeviceToAbsoluteTracking.m[2][3], -0.3f);
+
+    // A lost/stale hand is inactive even if the controller seam still has a
+    // connected device with grip held. The other hand remains independent.
+    klvr_null.skeleton[0].valid = 0;
+    CHECK(in->GetSkeletalActionData(skl, &sd, sizeof sd) == vr::VRInputError_None && !sd.bActive);
+    CHECK(in->GetSkeletalActionData(skr, &sd, sizeof sd) == vr::VRInputError_None && sd.bActive);
+    CHECK(in->GetSkeletalBoneData(skl, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_NoData);
+    CHECK(in->GetSkeletalTrackingLevel(skl, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Estimated);
+    klvr_null.fixed_now = 100.1;
+    CHECK(in->GetSkeletalActionData(skr, &sd, sizeof sd) == vr::VRInputError_None && !sd.bActive);
+    CHECK(in->GetSkeletalSummaryData(skr, vr::VRSummaryType_FromDevice, &sum) == vr::VRInputError_NoData);
+    CHECK(in->GetSkeletalBoneDataCompressed(skr, vr::VRSkeletalMotionRange_WithController, packed, sizeof packed, &need) == vr::VRInputError_NoData);
+    CHECK(in->GetSkeletalTrackingLevel(skr, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Estimated);
+    CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pd, sizeof pd, rh) == vr::VRInputError_None && !pd.bActive);
+    // Switching back retains the original controller-estimated behavior.
+    klvr_null.hand_tracking_enabled = 0;
+    klvr_null.fixed_now = 0;
+    CHECK(in->GetSkeletalTrackingLevel(skl, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Partial);
+    CHECK(in->GetSkeletalBoneData(skl, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_None);
+    NEAR(live[12].orientation.w, fist[12].orientation.w);
+
     // Haptics reach both bound hands, or one when restricted.
     unsigned hl = klvr_null.haptic_count[0], hr = klvr_null.haptic_count[1];
     CHECK(in->TriggerHapticVibrationAction(hap, 0, 0.1f, 160, 0.7f, 0) == vr::VRInputError_None);

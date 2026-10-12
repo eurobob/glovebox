@@ -287,6 +287,7 @@ if _icon_layers:
 # the guest libraries are one.
 SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
          "KleptonHandInput.swift", "KleptonHandGestures.swift", "KleptonHandMotion.swift",
+         "KleptonHandSkeleton.swift", "KleptonTrackedHand.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift"]
@@ -316,6 +317,8 @@ swift_filerefs = "\n".join(
        f'name = {s["name"]}; path = "{s["abs"]}"; sourceTree = "<absolute>"; }};') for s in swift)
 swift_children = "\n".join(f'\t\t\t\t{s["ref"]},' for s in swift)
 swift_sources  = "\n".join(f'\t\t\t\t{s["bld"]},' for s in swift)
+F_HAND = oid("FHAND"); B_HAND = oid("BHAND")
+F_HAND_LICENSE = oid("FHANDLIC"); B_HAND_LICENSE = oid("BHANDLIC")
 F_RT    = oid("FRT");   B_RT_LNK = oid("BRTLK")
 PKG_REF = oid("PKGREF"); PKG_DEP = oid("PKGDEP"); B_PKG = oid("BPKG")
 # The launcher's stutter reports (StutterReports.swift) link the project repo's diagnostics/ package, beside launcher/
@@ -539,6 +542,8 @@ PBX = f"""// !$*UTF8*$!
 
 /* Begin PBXBuildFile section */
 {swift_buildfiles}
+        {B_HAND} /* kl_hand_tracking.c */ = {{isa = PBXBuildFile; fileRef = {F_HAND}; }};
+        {B_HAND_LICENSE} = {{isa = PBXBuildFile; fileRef = {F_HAND_LICENSE}; }};
 		{B_C} /* kl_app.c in Sources */ = {{isa = PBXBuildFile; fileRef = {F_C}; }};
 		{B_ASSETS} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {F_ASSETS}; }};
 		{B_RT_LNK} /* Klepton.xcframework in Frameworks */ = {{isa = PBXBuildFile; fileRef = {F_RT}; }};
@@ -548,6 +553,8 @@ PBX = f"""// !$*UTF8*$!
 /* Begin PBXFileReference section */
 		{PRODUCT} /* {NAME}.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = {NAME}.app; sourceTree = BUILT_PRODUCTS_DIR; }};
 {swift_filerefs}
+        {F_HAND} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../../runtime/xr/kl_hand_tracking.c; sourceTree = "<group>"; }};
+        {F_HAND_LICENSE} = {{isa = PBXFileReference; lastKnownFileType = text; path = "THIRD-PARTY-HAND-TRACKING.txt"; sourceTree = "<group>"; }};
 		{F_C} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = kl_app.c; sourceTree = "<group>"; }};
 		{F_H} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = kl_app.h; sourceTree = "<group>"; }};
 		{F_BRIDGE} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Klepton-Bridging-Header.h"; sourceTree = "<group>"; }};
@@ -596,6 +603,8 @@ PBX = f"""// !$*UTF8*$!
 			isa = PBXGroup;
 			children = (
 {swift_children}
+                {F_HAND},
+                {F_HAND_LICENSE},
 				{F_C},
 				{F_H},
 				{F_BRIDGE},
@@ -674,6 +683,7 @@ PBX = f"""// !$*UTF8*$!
 			buildActionMask = 2147483647;
 			files = (
 				{B_ASSETS},
+                {B_HAND_LICENSE},
 {RES_PHASE}			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
@@ -685,6 +695,7 @@ PBX = f"""// !$*UTF8*$!
 			buildActionMask = 2147483647;
 			files = (
 {swift_sources}
+                {B_HAND},
 				{B_C},
 			);
 			runOnlyForDeploymentPostprocessing = 0;

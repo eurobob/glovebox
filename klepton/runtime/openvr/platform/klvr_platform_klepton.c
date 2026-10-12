@@ -18,7 +18,19 @@
 #include <time.h>
 #include "klvr_platform.h"
 #include "kl_ovrp.h"
+#include "kl_hand_tracking.h"
 #include "kl_vulkan.h"
+
+// Optional in older native apps using this runtime archive. The new frontend
+// compiles the bridge directly, so no change to the cached kl_ovrp object is
+// needed and controller-only frontends keep linking.
+#ifdef __APPLE__
+#define KLVR_HAND_WEAK __attribute__((weak_import))
+#else
+#define KLVR_HAND_WEAK __attribute__((weak))
+#endif
+extern int kl_hand_tracking_enabled(void) KLVR_HAND_WEAK;
+extern int kl_hand_tracking_read(int, float *, float *, float *, double) KLVR_HAND_WEAK;
 
 // ---- frame pacing ---------------------------------------------------------
 // Installed by the driver (visionos/Sources/kl_app.c) exactly as it installs
@@ -86,6 +98,25 @@ static int64_t mono_ns(void) {
 
 double klvr_plat_now(void) {
     return (mono_ns() + __atomic_load_n(&g_clock_offset_ns, __ATOMIC_RELAXED)) / 1e9;
+}
+
+int klvr_plat_hand_tracking_enabled(void) {
+    return kl_hand_tracking_enabled && kl_hand_tracking_enabled();
+}
+
+int klvr_plat_skeleton(int hand, float *bones, float *curl, float *splay) {
+    if (bones) memset(bones, 0, KL_HAND_TRACKING_BONE_COUNT * 7 * sizeof(float));
+    if (curl) memset(curl, 0, 5 * sizeof(float));
+    if (splay) memset(splay, 0, 4 * sizeof(float));
+    if (!kl_hand_tracking_read) return 0;
+    // The bridge's timestamp is always CACurrentMediaTime, even before the
+    // first display frame calibrates the more general frontend clock above.
+#ifdef CLOCK_UPTIME_RAW
+    double now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
+#else
+    double now = klvr_plat_now();
+#endif
+    return kl_hand_tracking_read(hand, bones, curl, splay, now);
 }
 
 // `t` is a display time the frontend published, in seconds.
@@ -529,6 +560,8 @@ static double ctrl_grace(void) {
 
 void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
     memset(out, 0, sizeof *out);
+    int tracked_hand = klvr_plat_hand_tracking_enabled();
+    if (tracked_hand && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) return;
     if (host()) {
         // Waist height, a forearm in front of the fixed head, pointing ahead.
         if (!host_hands()) return;
@@ -541,7 +574,7 @@ void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
         return;
     }
     out->valid = kl_ovrp_hand_motion(hand, out->pose.p, out->pose.q, out->vel, out->ang);
-    {
+    if (!tracked_hand) {
         int h = hand & 1;
         double now = klvr_plat_now();
         if (out->valid) {
@@ -567,15 +600,17 @@ void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
     // OpenXR grip by pitching +37 (KLXR_GRIP_PITCH_DEFAULT, checked by eye
     // against SteamVR over Steam Link), and so does this, with the same knob.
     // A rotation about the pose's own origin, so position and velocities stand.
-    static float pitch = -1000;
-    if (pitch == -1000) {
-        const char *e = getenv("KL_XR_GRIP_PITCH");
-        pitch = e && *e ? (float)atof(e) : 37.0f;
-        fprintf(stderr, "  [openvr] Sense pose -> OpenXR grip: pitched %.1f deg about X (KL_XR_GRIP_PITCH)\n", pitch);
+    if (!tracked_hand) {
+        static float pitch = -1000;
+        if (pitch == -1000) {
+            const char *e = getenv("KL_XR_GRIP_PITCH");
+            pitch = e && *e ? (float)atof(e) : 37.0f;
+            fprintf(stderr, "  [openvr] Sense pose -> OpenXR grip: pitched %.1f deg about X (KL_XR_GRIP_PITCH)\n", pitch);
+        }
+        float a = pitch * 3.14159265f / 360;
+        float rx[4] = { sinf(a), 0, 0, cosf(a) };
+        qmul(out->pose.q, rx, out->pose.q);
     }
-    float a = pitch * 3.14159265f / 360;
-    float rx[4] = { sinf(a), 0, 0, cosf(a) };
-    qmul(out->pose.q, rx, out->pose.q);
     if (!out->motion_known) return;
     // The frontend predicts the Sense pose to the frame's presentation time;
     // a caller asking for another instant is carried there on the measured
@@ -597,6 +632,8 @@ void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
 // Options and PS both arrive as BACK on the right and START/BACK on the left.
 void klvr_plat_controller(int hand, klvr_controller *out) {
     memset(out, 0, sizeof *out);
+    int tracked_hand = klvr_plat_hand_tracking_enabled();
+    if (tracked_hand && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) return;
     if (host()) { out->connected = host_hands(); return; }
     uint32_t b = 0, t = 0;
     float it = 0, ht = 0, sx = 0, sy = 0;
@@ -610,7 +647,7 @@ void klvr_plat_controller(int hand, klvr_controller *out) {
     float pos[3], quat[4];
     out->connected = present && kl_ovrp_hand_motion(hand, pos, quat, NULL, NULL);
     // Grace window (see klvr_plat_hand): still connected, nothing pressed.
-    if (!out->connected && g_hand_seen[hand & 1] > 0 && klvr_plat_now() - g_hand_seen[hand & 1] < ctrl_grace()) {
+    if (!tracked_hand && !out->connected && g_hand_seen[hand & 1] > 0 && klvr_plat_now() - g_hand_seen[hand & 1] < ctrl_grace()) {
         out->connected = 1;
         return;
     }

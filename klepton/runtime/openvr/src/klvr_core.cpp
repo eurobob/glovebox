@@ -281,6 +281,9 @@ static std::array<Pose, 2> make_raw_from_grip() {
 }
 
 const Pose &raw_from_grip(int hand) {
+    // Native skeletons and grip poses already share the anatomical palm root.
+    static const Pose identity = { { 0, 0, 0 }, { 0, 0, 0, 1 } };
+    if (klvr_plat_hand_tracking_enabled()) return identity;
     static const std::array<Pose, 2> p = make_raw_from_grip();
     return p[hand ? 1 : 0];
 }

@@ -10,12 +10,43 @@ struct KleptonGestureSample {
     var middlePinch: Float?
     var ringPinch: Float?
     var littlePinch: Float?
-    // Mean curl of the middle, ring and little fingers: open = 0, fist = 1.
+    // Minimum curl of the middle, ring and little fingers: open = 0, fist = 1.
     var gripCurl: Float?
     var position: SIMD3<Float>
     // Head-relative world-space axes. The clutch freezes these at activation.
     var stickRight: SIMD3<Float>
     var stickForward: SIMD3<Float>
+
+    /// Shared by ARKit and the pure geometry tests. Index selection and middle
+    /// navigation need only their own fingertip and the thumb. A naturally
+    /// folded or occluded ring/little finger must not erase a middle pinch.
+    static func fromFingertips(thumb: SIMD3<Float>?, index: SIMD3<Float>?,
+                              middle: SIMD3<Float>?, ring: SIMD3<Float>?, little: SIMD3<Float>?,
+                              middleCurl: Float?, ringCurl: Float?, littleCurl: Float?,
+                              position: SIMD3<Float>, stickRight: SIMD3<Float>,
+                              stickForward: SIMD3<Float>) -> Self {
+        func distance(to tip: SIMD3<Float>?) -> Float? {
+            guard let thumb, let tip else { return nil }
+            let distance = simd_distance(thumb, tip)
+            return distance.isFinite ? distance : nil
+        }
+        func faceDistance(to tip: SIMD3<Float>?, others: (Float?, Float?)) -> Float? {
+            // Retain the existing conservative face-button/fist distinction.
+            guard let a = others.0, let b = others.1, a < 0.5, b < 0.5 else { return nil }
+            return distance(to: tip)
+        }
+        let grip: Float?
+        if let middleCurl, let ringCurl, let littleCurl {
+            grip = min(middleCurl, ringCurl, littleCurl)
+        } else {
+            grip = nil
+        }
+        return Self(indexPinch: distance(to: index), middlePinch: distance(to: middle),
+                    ringPinch: faceDistance(to: ring, others: (middleCurl, littleCurl)),
+                    littlePinch: faceDistance(to: little, others: (middleCurl, ringCurl)),
+                    gripCurl: grip, position: position,
+                    stickRight: stickRight, stickForward: stickForward)
+    }
 }
 
 struct KleptonGestureOutput {
@@ -56,11 +87,12 @@ struct KleptonHandGestures {
             }
         }
 
-        // The index distances preserve the device-tested legacy trigger
-        // calibration (5 cm open / 3 cm closed, 0.55/0.30 hysteresis).
-        var down: Float { self == .index ? 0.039 : 0.023 }
-        var up: Float { self == .index ? 0.044 : 0.032 }
-        var debounce: Double { self == .index ? 0.02 : 0.05 }
+        // Index preserves the device-tested legacy calibration. Middle uses
+        // the same range and delay so index cannot win merely by qualifying
+        // earlier as the thumb approaches the adjacent middle fingertip.
+        var down: Float { self == .index || self == .middle ? 0.039 : 0.023 }
+        var up: Float { self == .index || self == .middle ? 0.044 : 0.032 }
+        var debounce: Double { self == .index || self == .middle ? 0.02 : 0.05 }
     }
 
     private static let gripDown: Float = 0.80
@@ -71,6 +103,7 @@ struct KleptonHandGestures {
     private static let minimumTriggerPress: Double = 0.06
     private static let stickDeadZone: Float = 0.01
     private static let stickFullScale: Float = 0.08
+    private static let pinchLead: Float = 0.003
 
     private var armedPinches = Set<Pinch>()
     private var lastTime: Double?
@@ -120,6 +153,14 @@ struct KleptonHandGestures {
                 armedPinches.remove(pinch)
                 if candidate == pinch { candidate = nil }
                 if active == pinch {
+                    // A neighbour already near the thumb is not a new pinch.
+                    // Losing navigation must not make that adjacent index tip
+                    // take over as fire on the following frame.
+                    for other in Pinch.allCases where other != pinch {
+                        if let distance = other.distance(in: sample), distance < other.up {
+                            armedPinches.remove(other)
+                        }
+                    }
                     clearActive()
                     released = true
                 }
@@ -156,13 +197,24 @@ struct KleptonHandGestures {
         // Finishing a momentary press precedes recognizing the next pinch, so
         // changing fingers quickly cannot overlap two exclusive button presses.
         if active == nil, !released, !hasPulse {
-            // A stable tie goes to index, then middle, ring, little. Once
-            // active, another finger cannot steal the pinch until release.
-            let nearest = Pinch.allCases.compactMap { pinch -> (Pinch, Float)? in
-                guard armedPinches.contains(pinch),
-                      let distance = pinch.distance(in: sample), distance <= pinch.down else { return nil }
+            // Compare all observed distances before applying press thresholds.
+            // A fingertip just outside its own threshold must still prevent a
+            // farther index fingertip from claiming the gesture. Near ties are
+            // ambiguous rather than automatic index presses. Once latched, the
+            // chosen finger keeps ownership until release/tracking loss.
+            let observed = Pinch.allCases.compactMap { pinch -> (Pinch, Float)? in
+                guard let distance = pinch.distance(in: sample) else { return nil }
                 return (pinch, distance)
-            }.min { $0.1 < $1.1 }?.0
+            }
+            let closest = observed.min { $0.1 < $1.1 }
+            let nearest: Pinch?
+            if let (pinch, distance) = closest,
+               armedPinches.contains(pinch), distance <= pinch.down,
+               observed.allSatisfy({ $0.0 == pinch || $0.1 - distance >= Self.pinchLead }) {
+                nearest = pinch
+            } else {
+                nearest = nil
+            }
             if nearest != candidate {
                 candidate = nearest
                 candidateSince = time

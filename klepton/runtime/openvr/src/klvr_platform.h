@@ -16,8 +16,8 @@
 //   Poses are in the platform's FLOOR space: y = 0 is the floor, and the
 //   standing universe is exactly this space. The shim derives the seated
 //   universe from it.
-//   Times are seconds on one monotonic clock (CLOCK_MONOTONIC on Darwin,
-//   which is what CACurrentMediaTime reads).
+//   Times follow the frontend's monotonic clock. On visionOS this is
+//   CACurrentMediaTime / CLOCK_UPTIME_RAW, which stops while asleep.
 #ifndef KLVR_PLATFORM_H
 #define KLVR_PLATFORM_H
 #include <stdint.h>
@@ -90,6 +90,13 @@ double klvr_plat_wait_frame(void);
 void   klvr_plat_head(double display_time, klvr_tracked *out);
 void   klvr_plat_hand(int hand, double display_time, klvr_tracked *out);
 void   klvr_plat_controller(int hand, klvr_controller *out);
+
+// Native articulated hands are a separate mode from controller-estimated
+// skeletons. When enabled but stale/lost, callers must not synthesize curls.
+int    klvr_plat_hand_tracking_enabled(void);
+// A fresh snapshot: 31 parent-space Valve bones (xyz + quaternion xyzw),
+// five finger curls and four adjacent-finger splays. Outputs may be NULL.
+int    klvr_plat_skeleton(int hand, float *bones31x7, float *curl5, float *splay4);
 
 // amplitude 0..1, frequency Hz (0 = device default), seconds <= 0 = a click.
 void   klvr_plat_haptic(int hand, float amplitude, float frequency, float seconds);

@@ -36,32 +36,17 @@ enum KleptonHandInput {
                   simd_length(b - a) > 0.001, simd_length(d - c) > 0.001 else { return nil }
             return max(0, min(1, (1 - simd_dot(simd_normalize(b - a), simd_normalize(d - c))) * 0.5))
         }
-        let thumb = point(.thumbTip)
-        func distance(to finger: HandSkeleton.JointName) -> Float? {
-            guard let thumb, let tip = point(finger) else { return nil }
-            return simd_distance(thumb, tip)
-        }
         let mc = curl(.middleFingerKnuckle, .middleFingerIntermediateBase, .middleFingerIntermediateTip, .middleFingerTip)
         let rc = curl(.ringFingerKnuckle, .ringFingerIntermediateBase, .ringFingerIntermediateTip, .ringFingerTip)
         let lc = curl(.littleFingerKnuckle, .littleFingerIntermediateBase, .littleFingerIntermediateTip, .littleFingerTip)
-        func facePinch(_ finger: HandSkeleton.JointName, others: (Float?, Float?)) -> Float? {
-            // Unknown or folded neighbouring fingers cannot classify a button
-            // gesture. They must not cancel an independently tracked index pinch.
-            guard let a = others.0, let b = others.1, a < 0.5, b < 0.5 else { return nil }
-            return distance(to: finger)
-        }
-        let grip: Float?
-        if let mc, let rc, let lc { grip = min(mc, rc, lc) } else { grip = nil }
         // A head sample is only needed to start a movement clutch. A missing
         // prediction, or looking vertically, must not disable menu selection.
         let right = head.map { SIMD3<Float>($0.columns.0.x, 0, $0.columns.0.z) } ?? .zero
         let forward = head.map { SIMD3<Float>(-$0.columns.2.x, 0, -$0.columns.2.z) } ?? .zero
-        return KleptonGestureSample(
-            indexPinch: distance(to: .indexFingerTip),
-            middlePinch: facePinch(.middleFingerTip, others: (rc, lc)),
-            ringPinch: facePinch(.ringFingerTip, others: (mc, lc)),
-            littlePinch: facePinch(.littleFingerTip, others: (mc, rc)),
-            gripCurl: grip, position: position,
+        return KleptonGestureSample.fromFingertips(
+            thumb: point(.thumbTip), index: point(.indexFingerTip),
+            middle: point(.middleFingerTip), ring: point(.ringFingerTip), little: point(.littleFingerTip),
+            middleCurl: mc, ringCurl: rc, littleCurl: lc, position: position,
             stickRight: right, stickForward: forward)
     }
 }

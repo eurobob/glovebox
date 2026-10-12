@@ -18,7 +18,11 @@
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+extern "C" void kl_fault_print_frames(FILE *f, void *fp) __attribute__((weak_import));
+#else
 extern "C" void kl_fault_print_frames(FILE *f, void *fp) __attribute__((weak));
+#endif
 namespace klvr {
 namespace {
 
@@ -782,7 +786,8 @@ static vr::EVRInputError pose_at(vr::VRActionHandle_t h, vr::ETrackingUniverseOr
     klvr_tracked g{};
     klvr_plat_hand(hand, t, &g);
     Pose off;
-    if (pose == "grip" || pose == "handgrip") off = { { 0, 0, 0 }, { 0, 0, 0, 1 } };
+    if (klvr_plat_hand_tracking_enabled() || pose == "grip" || pose == "handgrip")
+        off = { { 0, 0, 0 }, { 0, 0, 0, 1 } };
     else off = pmul(raw_from_grip(hand), component_offset(pose));
     fill_pose(&out->pose, g, u, &off);
     out->pose.bDeviceIsConnected = c.connected;
@@ -830,7 +835,7 @@ vr::EVRInputError IVRInput__GetSkeletalActionData(void *, vr::VRActionHandle_t h
     if (e) return e;
     klvr_controller c{};
     klvr_plat_controller(hand, &c);
-    out->bActive = c.connected;
+    out->bActive = klvr_plat_hand_tracking_enabled() ? klvr_plat_skeleton(hand, nullptr, nullptr, nullptr) : c.connected;
     out->activeOrigin = hand ? kRight : kLeft;
     return vr::VRInputError_None;
 }
@@ -889,8 +894,16 @@ vr::EVRInputError IVRInput__GetSkeletalReferenceTransforms(void *, vr::VRActionH
     return vr::VRInputError_None;
 }
 
-vr::EVRInputError IVRInput__GetSkeletalTrackingLevel(void *, vr::VRActionHandle_t, vr::EVRSkeletalTrackingLevel *out) {
-    if (out) *out = vr::VRSkeletalTracking_Partial;
+vr::EVRInputError IVRInput__GetSkeletalTrackingLevel(void *, vr::VRActionHandle_t h, vr::EVRSkeletalTrackingLevel *out) {
+    if (!out) return vr::VRInputError_InvalidParam;
+    *out = vr::VRSkeletalTracking_Partial;
+    if (klvr_plat_hand_tracking_enabled()) {
+        *out = vr::VRSkeletalTracking_Estimated;
+        int hand;
+        vr::EVRInputError e = skeleton_hand(h, hand);
+        if (e && e != vr::VRInputError_NoData) return e;
+        if (!e && klvr_plat_skeleton(hand, nullptr, nullptr, nullptr)) *out = vr::VRSkeletalTracking_Full;
+    }
     return vr::VRInputError_None;
 }
 
@@ -900,13 +913,23 @@ vr::EVRInputError IVRInput__GetSkeletalBoneData(void *, vr::VRActionHandle_t h, 
     int hand;
     vr::EVRInputError e = skeleton_hand(h, hand);
     if (e) return e;
-    klvr_controller c{};
-    klvr_plat_controller(hand, &c);
-    if (!c.connected) return vr::VRInputError_NoData;
-    float curl[5];
-    curls_from(c, curl);
     vr::VRBoneTransform_t xf[kBoneCount];
-    skel_pose(hand, curl, range, xf);
+    if (klvr_plat_hand_tracking_enabled()) {
+        float bones[kBoneCount * 7];
+        if (!klvr_plat_skeleton(hand, bones, nullptr, nullptr)) return vr::VRInputError_NoData;
+        for (int i = 0; i < kBoneCount; i++) {
+            const float *b = bones + i * 7;
+            xf[i].position = {{ b[0], b[1], b[2], 1 }};
+            xf[i].orientation = { b[6], b[3], b[4], b[5] };
+        }
+    } else {
+        klvr_controller c{};
+        klvr_plat_controller(hand, &c);
+        if (!c.connected) return vr::VRInputError_NoData;
+        float curl[5];
+        curls_from(c, curl);
+        skel_pose(hand, curl, range, xf);
+    }
     to_space(space, xf);
     memcpy(out, xf, sizeof xf);
     return vr::VRInputError_None;
@@ -915,12 +938,15 @@ vr::EVRInputError IVRInput__GetSkeletalBoneData(void *, vr::VRActionHandle_t h, 
 vr::EVRInputError IVRInput__GetSkeletalSummaryData(void *, vr::VRActionHandle_t h, vr::EVRSummaryType,
                                                    vr::VRSkeletalSummaryData_t *out) {
     if (!out) return vr::VRInputError_InvalidParam;
+    memset(out, 0, sizeof *out);
     int hand;
     vr::EVRInputError e = skeleton_hand(h, hand);
     if (e) return e;
+    if (klvr_plat_hand_tracking_enabled())
+        return klvr_plat_skeleton(hand, nullptr, out->flFingerCurl, out->flFingerSplay) ?
+            vr::VRInputError_None : vr::VRInputError_NoData;
     klvr_controller c{};
     klvr_plat_controller(hand, &c);
-    memset(out, 0, sizeof *out);
     curls_from(c, out->flFingerCurl);
     for (int i = 0; i < 4; i++) out->flFingerSplay[i] = 0.2f;
     return vr::VRInputError_None;

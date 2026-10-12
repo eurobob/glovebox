@@ -415,6 +415,7 @@ final class KleptonControllers {
     private let experimentalHands = KleptonHandInput.enabled
     private var handGestures = [KleptonHandGestures(), KleptonHandGestures()]
     private var handMotion = [KleptonHandMotion(), KleptonHandMotion()]
+    private var trackedHands = [KleptonTrackedHand(), KleptonTrackedHand()]
     private var gestureFrames = 0
     private var gesturePoseFrames = [0, 0]
     private var gestureIndexFrames = [0, 0]
@@ -1743,6 +1744,7 @@ final class KleptonControllers {
     /// and describe the same instant the head pose does.
     func update(leftHand: HandAnchor?, rightHand: HandAnchor?,
                 at presentationTime: TimeInterval, head: simd_float4x4? = nil) {
+        kl_hand_tracking_set_enabled(experimentalHands ? 1 : 0)
         if experimentalHands {
             updateGestureHands(left: leftHand, right: rightHand, head: head, at: presentationTime)
             return
@@ -1851,6 +1853,7 @@ final class KleptonControllers {
 
     private func releaseGestureHand(_ hand: Int, at time: TimeInterval) {
         handMotion[hand].reset()
+        trackedHands[hand].reset(hand: hand)
         _ = handGestures[hand].update(sample: nil, at: time, hand: hand)
         pinchHeld[hand] = false
         lock.lock(); let previous = state[hand]; lock.unlock()
@@ -1872,7 +1875,7 @@ final class KleptonControllers {
                                     head: simd_float4x4?, at time: TimeInterval) {
         if !loggedHandBuild {
             let stamp = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "dev"
-            NSLog("[hands] experimental input, build \(stamp)")
+            NSLog("[hands] tracked 31-bone skeleton and anatomical pose, build \(stamp)")
             loggedHandBuild = true
         }
         gestureFrames += 1
@@ -1884,7 +1887,11 @@ final class KleptonControllers {
                 releaseGestureHand(hand, at: time)
                 continue
             }
-            let (p, q) = gripPose(anchor, hand: hand)
+            guard let pose = trackedHands[hand].update(anchor, hand: hand, at: time) else {
+                releaseGestureHand(hand, at: time)
+                continue
+            }
+            let p = pose.p, q = pose.q
             guard p.x.isFinite, p.y.isFinite, p.z.isFinite,
                   q.vector.x.isFinite, q.vector.y.isFinite,
                   q.vector.z.isFinite, q.vector.w.isFinite else {

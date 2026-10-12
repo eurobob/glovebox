@@ -10,6 +10,8 @@ struct HandGestureTests {
         partialTracking()
         headingAvailability()
         quickIndexPress()
+        naturalMiddleGeometry()
+        adjacentFingerArbitration()
         exclusivityAndHysteresis()
         gripAndTrigger()
         navigationDoesNotGrab()
@@ -194,6 +196,89 @@ struct HandGestureTests {
         }
     }
 
+    private static func naturalMiddleGeometry() {
+        func geometry(thumb: SIMD3<Float>? = .zero, middle: SIMD3<Float>? = SIMD3(0.03, 0, 0),
+                      ring: SIMD3<Float>? = SIMD3(0.04, -0.02, 0),
+                      little: SIMD3<Float>? = SIMD3(0.04, -0.04, 0),
+                      ringCurl: Float? = 0.9, littleCurl: Float? = 0.95,
+                      position: SIMD3<Float> = .zero) -> KleptonGestureSample {
+            // Index and middle tips are 15 mm apart; the middle joint remains
+            // about 30 mm from the thumb at contact, like the index calibration.
+            .fromFingertips(thumb: thumb, index: SIMD3(0.03, 0.015, 0), middle: middle,
+                            ring: ring, little: little, middleCurl: 0.6,
+                            ringCurl: ringCurl, littleCurl: littleCurl,
+                            position: position, stickRight: SIMD3(1, 0, 0), stickForward: SIMD3(0, 0, -1))
+        }
+        let curled = geometry()
+        expect(abs((curled.middlePinch ?? 1) - 0.03) < 0.00001,
+               "Actual fingertip sampling keeps a middle pinch with naturally curled ring/little fingers")
+        expect(curled.ringPinch == nil && curled.littlePinch == nil,
+               "The existing conservative face-button gates remain unchanged")
+        let occluded = geometry(ring: nil, little: nil, ringCurl: nil, littleCurl: nil)
+        expect(abs((occluded.middlePinch ?? 1) - 0.03) < 0.00001 && occluded.gripCurl == nil,
+               "Missing unrelated fingertip/curl measurements cannot erase navigation")
+        expect(geometry(thumb: nil).middlePinch == nil, "Navigation still needs a tracked thumb")
+        expect(geometry(middle: nil).middlePinch == nil, "Navigation still needs its own tracked fingertip")
+
+        var gestures = KleptonHandGestures()
+        _ = gestures.update(sample: geometry(thumb: SIMD3(-0.08, 0, 0)), at: 0, hand: 0)
+        // At 34 mm the old 23 mm middle threshold excluded navigation while
+        // the adjacent index (37 mm away) could already fire. The actual
+        // geometric lead now makes middle the sole eligible target.
+        expect(neutral(gestures.update(sample: geometry(thumb: SIMD3(-0.004, 0, 0)), at: 0.1, hand: 0)),
+               "A natural middle approach starts debounce without firing index")
+        expect(neutral(gestures.update(sample: geometry(thumb: SIMD3(-0.001, 0, 0)), at: 0.122, hand: 0)),
+               "Middle activates at 31 mm using the same delay as index")
+        var output = gestures.update(sample: geometry(thumb: SIMD3(-0.001, 0, 0),
+                                                        position: SIMD3(0.06, 0, 0)), at: 0.15, hand: 0)
+        expect(output.stick.x > 0.7 && output.trigger == 0 && output.grip == 0,
+               "Natural folded-neighbour pinch drives navigation without trigger or grab")
+        output = gestures.update(sample: geometry(thumb: SIMD3(-0.001, 0, 0), ring: nil, little: nil,
+                                                   ringCurl: nil, littleCurl: nil,
+                                                   position: SIMD3(0.06, 0, 0)), at: 0.16, hand: 0)
+        expect(output.stick.x > 0.7 && output.trigger == 0,
+               "Navigation continues when unrelated fingers become occluded")
+        expect(neutral(gestures.update(sample: geometry(middle: nil), at: 0.17, hand: 0)),
+               "Own fingertip loss immediately stops navigation")
+        expect(neutral(gestures.update(sample: geometry(middle: nil), at: 0.2, hand: 0)),
+               "The adjacent closed index cannot take over after middle tracking loss")
+        expect(neutral(gestures.update(sample: geometry(middle: nil), at: 0.25, hand: 0)),
+               "A lost navigation pinch cannot become fire after the index debounce delay")
+        expect(neutral(gestures.update(sample: geometry(), at: 0.3, hand: 0)),
+               "Reappearing closed middle still requires a new observed-open sample")
+    }
+
+    private static func adjacentFingerArbitration() {
+        var gestures = armed()
+        for frame in 0..<10 {
+            let index: Float = frame % 2 == 0 ? 0.030 : 0.031
+            let middle: Float = frame % 2 == 0 ? 0.031 : 0.030
+            expect(neutral(gestures.update(sample: sample(index: index, middle: middle),
+                                           at: 0.1 + Double(frame) * 0.025, hand: 0)),
+                   "Ambiguous neighbouring fingertips cannot flicker into index or navigation")
+        }
+        _ = gestures.update(sample: sample(index: 0.038, middle: 0.030), at: 0.4, hand: 0)
+        _ = gestures.update(sample: sample(index: 0.038, middle: 0.030), at: 0.422, hand: 0)
+        let moving = gestures.update(sample: sample(index: 0.038, middle: 0.030,
+                                                     position: SIMD3(0.08, 0, 0)), at: 0.45, hand: 0)
+        expect(moving.stick.x > 0.99 && moving.trigger == 0,
+               "A clear middle lead resolves ambiguity without an earlier trigger press")
+
+        var face = armed()
+        _ = face.update(sample: sample(index: 0.035, ring: 0.026), at: 0.1, hand: 0)
+        expect(neutral(face.update(sample: sample(index: 0.035, ring: 0.026), at: 0.13, hand: 0)),
+               "A closer ring just outside its own threshold prevents a farther index from firing")
+        _ = face.update(sample: sample(index: 0.035, ring: 0.018), at: 0.2, hand: 0)
+        let pressed = face.update(sample: sample(index: 0.035, ring: 0.018), at: 0.26, hand: 0)
+        expect(pressed.primary && pressed.trigger == 0, "Ring button still activates at its existing threshold")
+
+        var unarmed = KleptonHandGestures()
+        _ = unarmed.update(sample: sample(middle: 0.02), at: 0, hand: 0)
+        _ = unarmed.update(sample: sample(index: 0.036, middle: 0.025), at: 0.1, hand: 0)
+        expect(neutral(unarmed.update(sample: sample(index: 0.036, middle: 0.025), at: 0.13, hand: 0)),
+               "A closer unarmed fingertip cannot be ignored in favour of an accidental trigger")
+    }
+
     private static func exclusivityAndHysteresis() {
         var gestures = armed()
         let ambiguous = sample(index: 0.019, middle: 0.01, ring: 0.018, little: 0.021)
@@ -206,7 +291,7 @@ struct HandGestureTests {
                                  at: 0.2, hand: 0)
         expect(output.stick.x > 0.99 && output.trigger == 0 && !output.primary
                 && !output.secondary, "Active middle pinch cannot be stolen")
-        output = gestures.update(sample: sample(index: 0.005, middle: 0.033), at: 0.3, hand: 0)
+        output = gestures.update(sample: sample(index: 0.005, middle: 0.045), at: 0.3, hand: 0)
         expect(neutral(output), "Release clears stick without switching immediately")
         _ = gestures.update(sample: sample(index: 0.02), at: 0.4, hand: 0)
         _ = gestures.update(sample: sample(index: 0.02), at: 0.46, hand: 0)

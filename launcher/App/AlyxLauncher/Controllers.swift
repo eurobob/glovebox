@@ -139,7 +139,7 @@ struct InputControlsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     if mode == .hands {
-                        Text("Keep both hands in view. Pinch a fingertip to your thumb, then release to reset. For middle, ring and little pinches, keep the other two fingers open.")
+                        Text("Keep both hands in view. Pinch a fingertip to your thumb, then release to reset. Middle pinch works with the other fingers relaxed. For ring/little pinches, keep the other two of those three fingers open.")
                             .foregroundStyle(.secondary)
                         control("Index + thumb", "Trigger: select and fire")
                         control("Curl middle, ring and little fingers", "Grip: hold and grab")

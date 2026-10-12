@@ -12,13 +12,22 @@ CC       ?= cc
 VULKAN_INCLUDE ?= /usr/include
 CXXFLAGS ?= -O2 -g
 CXXFLAGS += -std=c++17 -fPIC -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter -Werror=missing-declarations \
-            -DVR_API_EXPORT -Isrc -Ithird_party/openvr -I$(VULKAN_INCLUDE)
+            -DVR_API_EXPORT -Isrc -iquote third_party/openvr -I$(VULKAN_INCLUDE)
 CFLAGS   ?= -O2 -g
 CFLAGS   += -std=gnu11 -fPIC -Wall -Wextra
 
 SRC  = src/klvr_core.cpp src/klvr_private.cpp src/klvr_overlay.cpp src/klvr_registry.cpp src/klvr_system.cpp src/klvr_compositor.cpp \
        src/klvr_vk_submit.cpp src/klvr_input.cpp src/klvr_skeleton.cpp src/klvr_json.cpp src/klvr_misc.cpp src/klvr_trace.cpp
 OBJ  = $(SRC:src/%.cpp=build/%.o)
+
+ifeq ($(shell uname -s),Darwin)
+# The optional Klepton stack dumper is absent in the null platform. Darwin
+# needs its unresolved weak import explicitly allowed, and uses @loader_path.
+HOST_LINK_FLAGS = -Wl,-U,_kl_fault_print_frames -Wl,-install_name,@rpath/libklvr_openvr_null.so
+HOST_RPATH = @loader_path
+else
+HOST_RPATH = $$ORIGIN
+endif
 
 all: build/libklvr_openvr_null.so build/test_shim
 
@@ -31,13 +40,18 @@ build/klvr_platform_null.o: platform/klvr_platform_null.c platform/klvr_platform
 	$(CC) $(CFLAGS) -c $< -o $@
 
 build/libklvr_openvr_null.so: $(OBJ) build/klvr_platform_null.o
-	$(CXX) -shared -o $@ $^ -lpthread
+	$(CXX) -shared $(HOST_LINK_FLAGS) -o $@ $^ -lpthread
 
 build/test_shim: tests/test_shim.cpp build/libklvr_openvr_null.so
-	$(CXX) $(CXXFLAGS) -Iplatform -o $@ tests/test_shim.cpp -Lbuild -lklvr_openvr_null -Wl,-rpath,'$$ORIGIN' -lpthread
+	$(CXX) $(CXXFLAGS) -Iplatform -o $@ tests/test_shim.cpp -Lbuild -lklvr_openvr_null -Wl,-rpath,'$(HOST_RPATH)' -lpthread
 
-test: build/test_shim
+build/test_hand_tracking: tests/test_hand_tracking.c ../xr/kl_hand_tracking.c ../xr/kl_hand_tracking.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/test_hand_tracking.c ../xr/kl_hand_tracking.c -lpthread -lm
+
+test: build/test_shim build/test_hand_tracking
 	cd tests && ../build/test_shim
+	./build/test_hand_tracking
 
 regen:
 	python3 tools/gen_vtables.py $(OPENVR_REPO)

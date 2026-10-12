@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Prepare the fork's Xcode project using the original installer's cached assets.
 
-Does not download game data, build the runtime, install, or launch anything.
+Does not download or translate game data, install, or launch anything. Rebuilds
+only the small OpenVR hand-input shim when its source changes.
 The signed upstream app is left intact as a rollback candidate.
 """
 import argparse
@@ -69,6 +70,8 @@ def main():
             print(f"{kw.get('step')}: {kw.get('detail', '')}")
 
     b.kit(str(cache / "kit"), str(work), emit)
+    subprocess.run([sys.executable, str(root / "tools/patch-hand-runtime.py"),
+                    "--kit", str(cache / "kit"), "--work", str(work)], check=True)
     demo = b.defaults("alyx", str(work), str(cache / "pipelines.foz"), emit)
     env = dict(os.environ, KLEPTON_TEAM=args.team, KLEPTON_TARGET="alyx",
                KLEPTON_ALYX_DEMO=demo, KLEPTON_EVA="1",
