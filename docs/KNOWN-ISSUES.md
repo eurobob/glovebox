@@ -13,6 +13,7 @@
 | macOS asks for your Mac's password | Before the first build, if Xcode came from the App Store | Type it and click **Always Allow**. It asks once. |
 | The game stops opening | 7 days after installing with a free Apple Account | Open Glovebox on your Mac and press **Renew**. It shows two days before. |
 | The game downloads again | After switching to another Apple Account or team | Each team gets its own copy of the app on the headset, so stay with one. |
-| The download slows down | With the headset off | It carries on in the background, more slowly. Open Glovebox: HLA again to finish. |
+| The download slows down, or progress appears unchanged | With the headset off | Background transfers depend on the system's scheduling. Open Glovebox: HLA again to unpack the downloaded chunks and finish; the progress bar counts unpacked game data. |
+| The download needs more free space | Resuming a partial download | This fork reuses completed files and background chunks, and checks the additional space needed plus unpacking headroom. After freeing space, press **Install** or **Resume** to check again. Deleting the app also deletes the partial download. |
 
 Something not listed? Press **Copy diagnostics** in the Mac app and [open an issue](https://github.com/glovebox-vr/glovebox/issues/new).

@@ -52,8 +52,21 @@ public final class DepotDownloader: @unchecked Sendable {
     private func key(_ f: DepotManifest.File, _ c: DepotManifest.Chunk) -> String { "\(f.name)\t\(c.offset)" }
 
     private func loadJournal() {
+        done.removeAll()
         guard let text = try? String(contentsOf: journalURL, encoding: .utf8) else { return }
-        done = Set(text.split(separator: "\n").map(String.init))
+        let entries = Set(text.split(separator: "\n").map(String.init))
+        // A journal can outlive a removed or truncated output file. A sparse file's
+        // apparent size alone is never evidence that its chunks were downloaded.
+        for f in manifest.files where wanted(f) {
+            guard let rel = localPath(f.name),
+                  let attrs = try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent(rel).path),
+                  attrs[.type] as? FileAttributeType == .typeRegular,
+                  let size = (attrs[.size] as? NSNumber)?.uint64Value else { continue }
+            for c in f.chunks where c.offset <= size && UInt64(c.size) <= size - c.offset {
+                let entry = key(f, c)
+                if entries.contains(entry) { done.insert(entry) }
+            }
+        }
     }
 
     private func record(_ entries: [String]) {
@@ -74,6 +87,59 @@ public final class DepotDownloader: @unchecked Sendable {
     /// Bytes this download will fetch in total, given the policy.
     public var plannedBytes: UInt64 {
         manifest.files.filter(wanted).reduce(0) { $0 + $1.size }
+    }
+
+    /// Additional disk usage during this depot's staged-unpack and foreground-fetch phases.
+    /// The caller must stop background requests before using this estimate to start a download.
+    func installFootprint(staged: StagedChunks?,
+                          unpackers: Int = max(2, ProcessInfo.processInfo.activeProcessorCount)) -> InstallFootprint {
+        loadJournal()
+        var completed: UInt64 = 0
+        var groups: [String: (plain: UInt64, compressed: UInt64)] = [:]
+        let present = staged?.names() ?? []
+        for f in manifest.files where wanted(f) {
+            for c in f.chunks {
+                if done.contains(key(f, c)) {
+                    completed += UInt64(c.size)
+                } else {
+                    let name = StagedChunks.name(depotID: depotID, c)
+                    if present.contains(name) {
+                        var entry = groups[name] ?? (0, UInt64(c.compressedSize))
+                        entry.plain += UInt64(c.size)
+                        groups[name] = entry
+                    }
+                }
+            }
+        }
+        var stagedPlain: UInt64 = 0
+        var credits: [UInt64] = []
+        if let staged {
+            for (name, entry) in groups {
+                // Credit only disk blocks this run can reclaim, once per staged chunk.
+                // Capping by wire/plain sizes is conservative even for a corrupt cache file.
+                let values = try? staged.url(name).resourceValues(forKeys: [
+                    .isRegularFileKey, .fileSizeKey, .fileAllocatedSizeKey
+                ])
+                let allocated = UInt64(max(0, values?.fileAllocatedSize ?? 0))
+                let size = UInt64(max(0, values?.fileSize ?? 0))
+                let credit = values?.isRegularFile == true ? min(allocated, size, entry.compressed, entry.plain) : 0
+                stagedPlain += entry.plain
+                credits.append(credit)
+            }
+        }
+        let reclaimed = credits.reduce(0, +)
+        // Up to `unpackers` decoded chunks can be written before their staged inputs
+        // are removed. Reserve that overlap as well as the final increase in usage.
+        let overlap = credits.sorted(by: >).prefix(max(1, unpackers)).reduce(0, +)
+        return InstallFootprint(completedBytes: completed,
+                                growthBytes: plannedBytes - completed - reclaimed,
+                                unpackPeakBytes: stagedPlain - reclaimed + overlap)
+    }
+
+    struct InstallFootprint {
+        let completedBytes: UInt64
+        let growthBytes: UInt64
+        let unpackPeakBytes: UInt64
     }
 
     /// Chunks still to fetch, in download order: not yet written (per the journal) and not already
@@ -98,6 +164,7 @@ public final class DepotDownloader: @unchecked Sendable {
     /// system's background downloader) are left for a later run.
     public func run(staged: StagedChunks? = nil, skipping: Set<String> = [],
                     progress: @escaping @Sendable (DownloadProgress) -> Void) async throws {
+        try Task.checkCancellation()
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         loadJournal()
@@ -186,7 +253,9 @@ public final class DepotDownloader: @unchecked Sendable {
                     }
                     for _ in 0..<max(2, ProcessInfo.processInfo.activeProcessorCount) { if !addNext() { break } }
                     while let (name, items, ok) = try await group.next() {
-                        try? fm.removeItem(at: staged.url(name))
+                        // The install-space estimate relies on reclaiming this input.
+                        // Surface a removal failure instead of silently overrunning it.
+                        try fm.removeItem(at: staged.url(name))
                         // A bad staged chunk (cut short, or an error page) is simply fetched again.
                         if ok { finished(items, measureSpeed: false) } else { rest += items }
                         try Task.checkCancellation()
@@ -233,7 +302,7 @@ public final class DepotDownloader: @unchecked Sendable {
         let h = try FileHandle(forWritingTo: url)
         defer { try? h.close() }
         try h.seek(toOffset: offset)
-        h.write(data)
+        try h.write(contentsOf: data)
     }
 
     /// Checks every downloaded file against the manifest's SHA-1 (the Steam client's "verify").

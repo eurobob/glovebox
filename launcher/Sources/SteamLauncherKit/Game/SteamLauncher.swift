@@ -157,18 +157,43 @@ public final class SteamLauncher: @unchecked Sendable {
     }
 
     public var freeSpace: UInt64? {
+        // Before the first install, even Documents/alyx may not exist yet.
+        // Query an existing ancestor on the same volume without creating game data.
+        var volumeURL = installRoot
+        while !FileManager.default.fileExists(atPath: volumeURL.path), volumeURL.path != "/" {
+            volumeURL.deleteLastPathComponent()
+        }
         #if os(Linux)
-        let attrs = try? FileManager.default.attributesOfFileSystem(forPath: installRoot.deletingLastPathComponent().path)
+        let attrs = try? FileManager.default.attributesOfFileSystem(forPath: volumeURL.path)
         return (attrs?[.systemFreeSize] as? NSNumber)?.uint64Value
         #else
-        let v = try? installRoot.deletingLastPathComponent()
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        let v = try? volumeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         return v?.volumeAvailableCapacityForImportantUsage.map { UInt64(max(0, $0)) }
         #endif
     }
 
     /// Where the system's background downloader leaves chunks for the next install run.
     public var staged: StagedChunks { StagedChunks(installRoot: installRoot) }
+
+    /// Free disk space still needed to resume, excluding the UI's safety margin.
+    /// Finished chunks and reusable background chunks already occupy disk space;
+    /// demanding the full game size again would count that space twice.
+    /// Stop background requests before using this snapshot to start an install.
+    public func additionalBytesRequired(_ plan: InstallPlan) -> UInt64 {
+        let cdn = CDNClient(servers: plan.servers)
+        var growth: UInt64 = 0
+        var peak: UInt64 = 0
+        for d in plan.depots {
+            let footprint = downloader(cdn: cdn, depotID: d.depotID, key: d.key, manifest: d.manifest)
+                .installFootprint(staged: staged)
+            // Each depot unpacks its cache before fetching the rest. Later depots'
+            // staged storage cannot be reclaimed to pay for earlier depots' writes.
+            peak = max(peak, growth + footprint.unpackPeakBytes)
+            growth += footprint.growthBytes
+            peak = max(peak, growth)
+        }
+        return peak
+    }
 
     /// Every chunk the plan still needs, in download order, minus what is already staged.
     public func remainingChunks(_ plan: InstallPlan) -> [ChunkRequest] {
@@ -187,10 +212,14 @@ public final class SteamLauncher: @unchecked Sendable {
         let cdn = CDNClient(servers: plan.servers)
         let total = plan.totalBytes
         let staged = self.staged
+        let downloaders = plan.depots.map { downloader(cdn: cdn, depotID: $0.depotID, key: $0.key, manifest: $0.manifest) }
+        let completed = downloaders.map { $0.installFootprint(staged: nil).completedBytes }
+        var existing = completed.reduce(0, +)
         var before: UInt64 = 0
-        for d in plan.depots {
-            let dl = downloader(cdn: cdn, depotID: d.depotID, key: d.key, manifest: d.manifest)
-            let offset = before
+        for (index, pair) in zip(plan.depots, downloaders).enumerated() {
+            let (d, dl) = pair
+            existing -= completed[index]
+            let offset = before + existing
             try await dl.run(staged: staged, skipping: skipping) { p in
                 var q = p
                 q.totalBytes = total
@@ -199,6 +228,7 @@ public final class SteamLauncher: @unchecked Sendable {
             }
             before += d.bytes
         }
+        try Task.checkCancellation()
         guard skipping.isEmpty else { return }
         staged.clear()
         let state = InstalledState(buildID: plan.buildID,

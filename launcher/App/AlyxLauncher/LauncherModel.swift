@@ -39,6 +39,9 @@ final class LauncherModel: ObservableObject {
     @Published var install: InstallState = .unknown
     @Published var downloadBytes: UInt64 = 0
     @Published var freeSpace: UInt64?
+    /// Additional space still needed, including temporary-download headroom.
+    @Published var requiredInstallSpace: UInt64?
+    @Published var checkingInstallSpace = false
     @Published var buildID: UInt64 = 0
     /// True while saves sync right before the game starts.
     @Published var launching = false
@@ -74,6 +77,8 @@ final class LauncherModel: ObservableObject {
     private var passwordSession: SteamAuthSession?
     private var signInTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
+    private var spaceRefreshTask: Task<Void, Never>?
+    private var backgroundHandoffTask: Task<Void, Never>?
     private var saveSync: Task<Void, Never>?
     private var playTask: Task<Void, Never>?
     /// Whether the app is in front. Downloads move to the system's background downloader when it isn't.
@@ -205,9 +210,15 @@ final class LauncherModel: ObservableObject {
 
     func signOut() {
         installTask?.cancel()
+        spaceRefreshTask?.cancel()
+        let handoff = backgroundHandoffTask
+        handoff?.cancel()
         wasDownloading = false
         resumeWhenActive = false
-        Task { await Self.backgroundFetcher.stop() }
+        Task {
+            await handoff?.value
+            await Self.backgroundFetcher.stop()
+        }
         Task { await launcher.signOut() }
         Keychain.clear()
         accountName = ""
@@ -218,6 +229,7 @@ final class LauncherModel: ObservableObject {
     // MARK: Install
 
     func refreshInstall() async {
+        spaceRefreshTask?.cancel()
         install = .preparing
         freeSpace = launcher.freeSpace
         do {
@@ -225,6 +237,7 @@ final class LauncherModel: ObservableObject {
             plan = p
             buildID = p.buildID
             downloadBytes = p.totalBytes
+            await refreshInstallSpace(for: p)
             install = launcher.installed == nil ? .notInstalled : .installed(updateAvailable: launcher.needsUpdate(p))
             // A download that was running when the app last went away picks up on its own.
             if wasDownloading, case .installed(updateAvailable: false) = install {
@@ -238,8 +251,19 @@ final class LauncherModel: ObservableObject {
     }
 
     var hasRoomForInstall: Bool {
-        guard let freeSpace else { return true }
-        return freeSpace > downloadBytes + 2_000_000_000
+        guard let freeSpace, let requiredInstallSpace else { return true }
+        return freeSpace >= requiredInstallSpace
+    }
+
+    private func refreshInstallSpace(for plan: SteamLauncher.InstallPlan) async {
+        let launcher = self.launcher
+        let remaining = await Task.detached(priority: .utility) {
+            launcher.additionalBytesRequired(plan)
+        }.value
+        guard !Task.isCancelled else { return }
+        requiredInstallSpace = remaining + 2_000_000_000
+        // Read after inspecting existing chunks: background transfers may have progressed.
+        freeSpace = launcher.freeSpace
     }
 
     func setShareStutters(_ on: Bool) {
@@ -248,12 +272,38 @@ final class LauncherModel: ObservableObject {
     }
 
     func startInstall() {
-        guard let plan else { return }
-        installTask?.cancel()
+        guard !checkingInstallSpace else { return }
+        guard let plan else {
+            // A failed first manifest request leaves no plan. Try Again must plan again.
+            guard install != .preparing else { return }
+            install = .preparing
+            Task { await refreshInstall() }
+            return
+        }
+        spaceRefreshTask?.cancel()
+        let previous = installTask
+        previous?.cancel()
+        let handoff = backgroundHandoffTask
+        handoff?.cancel()
         resumeWhenActive = false
-        wasDownloading = true
-        install = .downloading(DownloadProgress(totalBytes: plan.totalBytes))
+        checkingInstallSpace = true
         installTask = Task {
+            await previous?.value
+            await handoff?.value
+            // Stop adding background batches before measuring the remaining footprint.
+            // This cancels requests and removes their queue, but preserves staged chunks.
+            await Self.backgroundFetcher.stop()
+            await refreshInstallSpace(for: plan)
+            checkingInstallSpace = false
+            guard !Task.isCancelled else { return }
+            guard hasRoomForInstall else {
+                if case .downloading(let progress) = install { install = .paused(progress) }
+                return
+            }
+            guard isActive else { resumeWhenActive = true; return }
+            resumeWhenActive = false
+            wasDownloading = true
+            install = .downloading(DownloadProgress(totalBytes: plan.totalBytes))
             do {
                 try await runInstall(plan)
                 Self.keepOutOfBackup()
@@ -270,9 +320,8 @@ final class LauncherModel: ObservableObject {
         }
     }
 
-    /// The app fetches from the front of what's left; the system's background downloader takes
-    /// a batch from the back, so if the app goes away mid-download the system is already on it.
-    /// When the app's share is done it takes back whatever the system hasn't fetched yet.
+    /// In front, unpack staged chunks and finish directly. Background batches are stopped before
+    /// the space check; a new batch is handed to the system only when the app goes to the background.
     private func runInstall(_ plan: SteamLauncher.InstallPlan) async throws {
         let report: @Sendable (DownloadProgress) -> Void = { p in
             Task { @MainActor [weak self] in
@@ -280,25 +329,20 @@ final class LauncherModel: ObservableObject {
                 self.install = .downloading(p)
             }
         }
-        let background = Self.backgroundFetcher
-        let launcher = self.launcher
-        let remaining = await Task.detached { launcher.remainingChunks(plan) }.value
-        await background.plan(remaining, servers: CDNClient(servers: plan.servers).baseURLs, firstBatchShare: 0.5)
-        let pending = await background.pendingNames()
-        try await launcher.install(plan, skipping: pending, progress: report)
-        if !pending.isEmpty {
-            await background.stop()
-            try await launcher.install(plan, progress: report)
-        }
-        await background.stop()
+        try await launcher.install(plan, progress: report)
     }
 
     func pauseInstall() {
         if case .downloading(let p) = install { install = .paused(p) }
         installTask?.cancel()
+        let handoff = backgroundHandoffTask
+        handoff?.cancel()
         wasDownloading = false
         resumeWhenActive = false
-        Task { await Self.backgroundFetcher.stop() }
+        Task {
+            await handoff?.value
+            await Self.backgroundFetcher.stop()
+        }
     }
 
     // MARK: In front, or not
@@ -307,12 +351,23 @@ final class LauncherModel: ObservableObject {
         switch phase {
         case .active:
             isActive = true
-            if resumeWhenActive { startInstall() }
+            spaceRefreshTask?.cancel()
+            if resumeWhenActive {
+                startInstall()
+            } else if let plan {
+                spaceRefreshTask = Task { await refreshInstallSpace(for: plan) }
+            } else {
+                freeSpace = launcher.freeSpace
+            }
             // Back from Settings, tracking may have just been turned on.
             refreshControllerAccess()
         case .background:
             isActive = false
-            handDownloadToSystem()
+            if checkingInstallSpace {
+                resumeWhenActive = true
+            } else {
+                handDownloadToSystem()
+            }
         default:
             break
         }
@@ -332,12 +387,14 @@ final class LauncherModel: ObservableObject {
             MainActor.assumeIsolated { assertion.end() }
         }
         let launcher = self.launcher
-        Task {
+        backgroundHandoffTask = Task {
+            defer { assertion.end() }
             await running?.value  // the journal is flushed when the in-app download stops
+            guard !Task.isCancelled, !isActive, resumeWhenActive else { return }
             let remaining = await Task.detached { launcher.remainingChunks(plan) }.value
+            guard !Task.isCancelled, !isActive, resumeWhenActive else { return }
             await Self.backgroundFetcher.plan(remaining, servers: CDNClient(servers: plan.servers).baseURLs)
             await Self.keepOutOfBackup().value  // the game so far and the system's chunk folder
-            assertion.end()
         }
     }
 

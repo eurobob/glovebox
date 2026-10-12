@@ -47,6 +47,13 @@ final class StagedChunkTests: XCTestCase {
         try FileManager.default.createDirectory(at: staged.folder, withIntermediateDirectories: true)
         try f.raw.write(to: staged.url(f.shared))
 
+        let footprint = f.dl.installFootprint(staged: staged, unpackers: 1)
+        XCTAssertEqual(footprint.completedBytes, 0)
+        XCTAssertEqual(footprint.growthBytes, UInt64(plain.count * 2 + 100 - f.raw.count),
+                       "One encrypted staged input receives credit once even though two output ranges share it")
+        XCTAssertEqual(footprint.unpackPeakBytes, UInt64(plain.count * 2),
+                       "Both output copies must fit before their shared staged input is removed")
+
         let last = Box<DownloadProgress>()
         // b.bin's chunk is still with the background downloader, so this run leaves it alone.
         try await f.dl.run(staged: staged, skipping: [f.other]) { last.value = $0 }
@@ -58,6 +65,10 @@ final class StagedChunkTests: XCTestCase {
         XCTAssertEqual(last.value?.doneFiles, 1)
         // The journal has both copies, so only b.bin's chunk is left.
         XCTAssertEqual(f.dl.remaining(staged: staged).map(\.name), [f.other])
+        let after = f.dl.installFootprint(staged: staged)
+        XCTAssertEqual(after.completedBytes, UInt64(plain.count * 2))
+        XCTAssertEqual(after.growthBytes, 100)
+        XCTAssertEqual(after.unpackPeakBytes, 0)
     }
 
     func testBadStagedChunkIsFetchedAgain() async throws {

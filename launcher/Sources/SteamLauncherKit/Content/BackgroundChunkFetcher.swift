@@ -5,8 +5,8 @@ import Foundation
 /// system's background download service (a background `URLSession`).
 ///
 /// The system downloads raw chunks into `StagedChunks`; the launcher's next install run unpacks
-/// them (it holds the depot key). Work is split so both sides are always busy without overlap:
-/// the app fetches from the front of the remaining list, the system takes a batch from the back.
+/// them (it holds the depot key). The launcher stops this queue while it is in front so it can
+/// reclaim staged storage as it downloads, then hands the remaining work back on suspension.
 /// Batches are created while the app is in front where possible, because the system starts tasks
 /// created in the background only when it judges conditions good (power, Wi-Fi). When a batch
 /// finishes the system wakes the app, which hands it the next batch from the saved queue.
@@ -22,6 +22,7 @@ public final class BackgroundChunkFetcher: NSObject, URLSessionDownloadDelegate,
     private let lock = NSLock()
     private var finishEvents: (() -> Void)?
     private var _session: URLSession?
+    private var stopped = false
 
     struct Queue: Codable {
         var servers: [URL]
@@ -72,19 +73,33 @@ public final class BackgroundChunkFetcher: NSObject, URLSessionDownloadDelegate,
     /// keeps the front for itself while it is in the foreground.
     public func plan(_ remaining: [ChunkRequest], servers: [URL], firstBatchShare: Double = 1) async {
         let pending = await pendingNames()
-        save(Queue(servers: servers, chunks: remaining.filter { !pending.contains($0.name) }))
+        resumeQueue(Queue(servers: servers, chunks: remaining.filter { !pending.contains($0.name) }))
         guard pending.isEmpty else { return }
         enqueueNextBatch(limit: min(batchSize, Int(Double(remaining.count) * firstBatchShare)))
     }
 
     /// Cancels the system's downloads and forgets the queue: the app is back and finishes on its own.
     public func stop() async {
-        try? FileManager.default.removeItem(at: queueURL)
+        stopQueue()
         for t in await session.allTasks { t.cancel() }
     }
 
+    private func stopQueue() {
+        lock.lock(); defer { lock.unlock() }
+        stopped = true
+        try? FileManager.default.removeItem(at: queueURL)
+    }
+
+    private func resumeQueue(_ queue: Queue) {
+        lock.lock(); defer { lock.unlock() }
+        stopped = false
+        save(queue)
+    }
+
     private func enqueueNextBatch(limit: Int) {
-        guard limit > 0, var q = load(), let base = q.servers.first else { return }
+        let session = self.session
+        lock.lock(); defer { lock.unlock() }
+        guard !stopped, limit > 0, var q = load(), let base = q.servers.first else { return }
         let present = staged.names()
         var batch: [ChunkRequest] = []
         while batch.count < limit, let c = q.chunks.popLast() {
@@ -116,6 +131,10 @@ public final class BackgroundChunkFetcher: NSObject, URLSessionDownloadDelegate,
 
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         // The file at `location` is deleted when this returns, so it is moved now.
+        lock.lock(); defer { lock.unlock() }
+        // A cancellation can race a completion callback. Once the foreground has
+        // measured free space, late callbacks must not add unbudgeted staged data.
+        guard !stopped else { return }
         guard let name = downloadTask.taskDescription,
               (downloadTask.response as? HTTPURLResponse)?.statusCode == 200 else { return }
         let fm = FileManager.default

@@ -123,6 +123,7 @@ struct LibraryView: View {
 
     /// Which button is showing, for the hand-off animation between them (not every progress tick).
     private var stage: String {
+        if model.checkingInstallSpace { return "checking-space" }
         switch model.install {
         case .unknown, .preparing: return "wait"
         case .notInstalled: return "install"
@@ -139,6 +140,16 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private var actionButton: some View {
+        if model.checkingInstallSpace {
+            Button {} label: { spinner }
+                .bigButton()
+                .disabled(true)
+        } else {
+            installActionButton
+        }
+    }
+
+    @ViewBuilder private var installActionButton: some View {
         switch model.install {
         case .unknown, .preparing:
             Button {} label: { spinner }
@@ -147,7 +158,6 @@ struct LibraryView: View {
         case .notInstalled:
             Button { model.startInstall() } label: { actionLabel("Install", "arrow.down") }
                 .bigButton()
-                .disabled(!model.hasRoomForInstall)
         case .failed:
             Button { model.startInstall() } label: { actionLabel("Try Again", "arrow.clockwise") }
                 .bigButton()
@@ -194,18 +204,31 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private var status: some View {
+        if model.checkingInstallSpace {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Checking existing downloads", systemImage: "externaldrive")
+                    .font(.title3)
+                Text("Downloaded files are kept and reused.").font(.callout)
+            }
+            .foregroundStyle(.secondary)
+        } else {
+            installStatus
+        }
+    }
+
+    @ViewBuilder private var installStatus: some View {
         switch model.install {
         case .notInstalled:
             if model.hasRoomForInstall {
                 Text("\(model.downloadBytes.bytes) download").font(.title3).foregroundStyle(.secondary)
             } else {
-                Label("Needs \(model.downloadBytes.bytes) of free space", systemImage: "externaldrive.badge.exclamationmark")
-                    .font(.title3).foregroundStyle(.orange)
+                storageNeeded
             }
         case .downloading(let p):
             DownloadStatus(progress: p, paused: false)
         case .paused(let p):
-            DownloadStatus(progress: p, paused: true)
+            if model.hasRoomForInstall { DownloadStatus(progress: p, paused: true) }
+            else { storageNeeded }
         case .installed(updateAvailable: false):
             if let preparing = model.preparing {
                 PreparingStatus(preparing: preparing)
@@ -223,11 +246,25 @@ struct LibraryView: View {
                     .font(.title3).foregroundStyle(.secondary)
             }
         case .installed(updateAvailable: true):
-            Text("A new version is ready").font(.title3).foregroundStyle(.secondary)
+            if model.hasRoomForInstall {
+                Text("A new version is ready").font(.title3).foregroundStyle(.secondary)
+            } else { storageNeeded }
         case .failed(let msg):
-            Label(msg, systemImage: "exclamationmark.circle.fill").font(.title3).foregroundStyle(.orange)
+            if model.hasRoomForInstall {
+                Label(msg, systemImage: "exclamationmark.circle.fill").font(.title3).foregroundStyle(.orange)
+            } else { storageNeeded }
         default:
             EmptyView()
+        }
+    }
+
+    private var storageNeeded: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Needs \((model.requiredInstallSpace ?? 0).bytes) free to finish",
+                  systemImage: "externaldrive.badge.exclamationmark")
+                .font(.title3).foregroundStyle(.orange)
+            Text("Downloaded files are kept and reused.")
+                .font(.callout).foregroundStyle(.secondary)
         }
     }
 
@@ -334,9 +371,9 @@ private struct DownloadStatus: View {
                     .contentTransition(.numericText())
             }
             ProgressView(value: progress.fraction)
-            Text(paused ? "\(progress.doneBytes.bytes) of \(progress.totalBytes.bytes)"
-                        : "Keeps downloading if you close this window")
-                .font(.callout)
+            Text(paused ? "\(progress.doneBytes.bytes) of \(progress.totalBytes.bytes) · Downloaded files are kept."
+                        : "Keeps downloading when closed. Background downloads count after unpacking on resume.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .frame(width: 420)
