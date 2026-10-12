@@ -3,24 +3,40 @@ import UIKit
 import GameController
 import ARKit
 
-/// The PS VR2 Sense controllers. The game can't be played without them, so Play waits until both
-/// are on and the app may track them, and the page says what's missing in a line.
+/// Shared with the game's input bridge through UserDefaults. This experimental fork starts in
+/// hands mode; choosing Sense restores the original controller requirements.
+enum LauncherInputMode: String, CaseIterable, Identifiable {
+    case hands, sense
+
+    static let defaultsKey = "glovebox.inputMode"
+    static var saved: Self {
+        UserDefaults.standard.string(forKey: defaultsKey).flatMap(Self.init(rawValue:)) ?? .hands
+    }
+
+    var id: String { rawValue }
+    var title: String { self == .hands ? "Hands (Experimental)" : "PS VR2 Sense" }
+}
+
+/// Tracking permissions and the Sense controllers connected right now.
 struct ControllerState: Equatable {
     enum Access: Equatable { case notAsked, allowed, denied }
     /// Sense controllers connected right now (the game needs both).
     var connected = 0
     var access = Access.notAsked
+    var handAccess = Access.notAsked
 }
 
 /// What stands between the player and Play.
 enum ControllerIssue: Equatable {
     case trackingDenied
     case notConnected(Int)
+    case handTrackingDenied
+    case handTrackingUnavailable
+    case senseUnavailable
 }
 
 extension LauncherModel {
-    /// A host with no controllers to check can turn this off. Before visionOS 26 there is no Sense
-    /// support, so nothing is checked there either.
+    /// A host with no controllers to check can turn this off for Sense mode.
     static var requiresControllers = true
 
     /// Other tracking permissions to ask for together with the controllers' at Play, so every
@@ -31,15 +47,23 @@ extension LauncherModel {
     private static let arSession = ARKitSession()
 
     var controllerIssue: ControllerIssue? {
-        guard Self.requiresControllers, #available(visionOS 26.0, *) else { return nil }
-        if controllers.access == .denied { return .trackingDenied }
-        if controllers.connected < 2 { return .notConnected(controllers.connected) }
-        return nil
+        switch inputMode {
+        case .hands:
+            guard HandTrackingProvider.isSupported else { return .handTrackingUnavailable }
+            return controllers.handAccess == .denied ? .handTrackingDenied : nil
+        case .sense:
+            guard Self.requiresControllers else { return nil }
+            guard #available(visionOS 26.0, *) else { return .senseUnavailable }
+            if controllers.access == .denied { return .trackingDenied }
+            if controllers.connected < 2 { return .notConnected(controllers.connected) }
+            return nil
+        }
     }
 
     /// Counts the Sense controllers now and whenever one connects or drops, so Play unlocks by
     /// itself the moment the second one turns on.
     func watchControllers() {
+        refreshControllerAccess()
         guard #available(visionOS 26.0, *) else { return }
         countControllers()
         for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
@@ -48,7 +72,6 @@ extension LauncherModel {
                 MainActor.assumeIsolated { model?.countControllers() }
             }
         }
-        refreshControllerAccess()
     }
 
     @available(visionOS 26.0, *)
@@ -60,20 +83,34 @@ extension LauncherModel {
 
     /// The permission as it stands, without asking: at start, and on coming back from Settings.
     func refreshControllerAccess() {
-        guard DemoState.current == nil, #available(visionOS 26.0, *) else { return }
+        guard DemoState.current == nil else { return }
         Task {
-            let status = await Self.arSession.queryAuthorization(for: [.accessoryTracking])
-            controllers.access = .init(status[.accessoryTracking])
+            var permissions: [ARKitSession.AuthorizationType] = [.handTracking]
+            if #available(visionOS 26.0, *) { permissions.append(.accessoryTracking) }
+            let status = await Self.arSession.queryAuthorization(for: permissions)
+            controllers.handAccess = .init(status[.handTracking])
+            if #available(visionOS 26.0, *) {
+                controllers.access = .init(status[.accessoryTracking])
+            }
         }
     }
 
-    /// Asks for controller tracking if nobody has yet, so the system's dialog appears here, after
-    /// Play, rather than as the game starts. False if it's turned off.
+    /// Asks for the selected input's tracking at Play, so its dialog appears over the launcher.
     func allowControllerTracking() async -> Bool {
-        guard Self.requiresControllers, DemoState.current == nil, #available(visionOS 26.0, *) else { return true }
-        let status = await Self.arSession.requestAuthorization(for: [.accessoryTracking] + Self.alsoAsk)
-        controllers.access = .init(status[.accessoryTracking])
-        return controllers.access != .denied
+        guard DemoState.current == nil else { return true }
+        switch inputMode {
+        case .hands:
+            guard HandTrackingProvider.isSupported else { return false }
+            let status = await Self.arSession.requestAuthorization(for: [.handTracking])
+            controllers.handAccess = .init(status[.handTracking])
+            return controllers.handAccess == .allowed
+        case .sense:
+            guard Self.requiresControllers else { return true }
+            guard #available(visionOS 26.0, *) else { return false }
+            let status = await Self.arSession.requestAuthorization(for: [.accessoryTracking] + Self.alsoAsk)
+            controllers.access = .init(status[.accessoryTracking])
+            return controllers.access == .allowed
+        }
     }
 }
 
@@ -87,23 +124,80 @@ private extension ControllerState.Access {
     }
 }
 
-/// In place of the saves line while Play waits: the two controllers (lit when on) and what to do.
+/// Available before Play, with the gestures used by the experimental hand input bridge.
+struct InputControlsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let mode: LauncherInputMode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack {
+                Text(mode.title).font(.title.weight(.bold))
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if mode == .hands {
+                        Text("Keep both hands in view. Pinch a fingertip to your thumb, then release to reset. For middle, ring and little pinches, keep the other two fingers open.")
+                            .foregroundStyle(.secondary)
+                        control("Index + thumb", "Trigger: select and fire")
+                        control("Curl middle, ring and little fingers", "Grip: hold and grab")
+                        control("Middle + thumb, then move your hand", "Virtual stick: left hand moves; right hand turns. Pull the right hand back to teleport.")
+                        control("Hold middle + thumb still for 0.8 seconds", "Click that hand's virtual stick")
+                        control("Ring + thumb", "Left hand: X · Right hand: A")
+                        control("Little + thumb", "Left hand: tap and release for Y · Right hand: B")
+                        control("Hold left little + thumb for 0.8 seconds", "Open the game menu")
+                        Text("Release the middle pinch to stop moving. Re-pinch to set a new stick center. Gesture controls are experimental and may need practice.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Text("Turn on both controllers with their PS buttons. Pair them in Settings › Bluetooth the first time.")
+                            .foregroundStyle(.secondary)
+                        control("Triggers", "Select and fire")
+                        control("Grip buttons", "Hold and grab")
+                        control("Thumbsticks", "Move, turn and teleport using the game's bindings")
+                        control("Face buttons", "A / B / X / Y actions using the game's bindings")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(36)
+        .frame(width: 720, height: 650)
+    }
+
+    private func control(_ gesture: String, _ action: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(gesture).font(.headline)
+            Text(action).foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// In place of the saves line while Play waits: the selected input and what to do.
 struct ControllerStatus: View {
     let issue: ControllerIssue
     let connected: Int
 
     var body: some View {
         HStack(spacing: 20) {
-            SenseControllers(on: connected, waiting: issue != .trackingDenied)
-                .overlay(alignment: .bottomTrailing) {
-                    if issue == .trackingDenied {
-                        Image(systemName: "lock.fill")
-                            .font(.caption.weight(.bold))
-                            .padding(6)
-                            .background(.orange, in: .circle)
-                            .offset(x: 6, y: 4)
+            if issue == .handTrackingDenied || issue == .handTrackingUnavailable {
+                Image(systemName: "hand.raised.fingers.spread.fill")
+                    .font(.system(size: 42))
+                    .foregroundStyle(.secondary)
+            } else {
+                SenseControllers(on: connected, waiting: issue != .trackingDenied && issue != .senseUnavailable)
+                    .overlay(alignment: .bottomTrailing) {
+                        if issue == .trackingDenied {
+                            Image(systemName: "lock.fill")
+                                .font(.caption.weight(.bold))
+                                .padding(6)
+                                .background(.orange, in: .circle)
+                                .offset(x: 6, y: 4)
+                        }
                     }
-                }
+            }
             VStack(alignment: .leading, spacing: 4) {
                 switch issue {
                 case .notConnected(let n):
@@ -113,14 +207,24 @@ struct ControllerStatus: View {
                         .font(.callout).foregroundStyle(.secondary)
                     Text("First time? Pair them in Settings › Bluetooth.")
                         .font(.callout).foregroundStyle(.tertiary)
-                case .trackingDenied:
-                    Text("Controller tracking is off")
+                case .trackingDenied, .handTrackingDenied:
+                    Text(issue == .handTrackingDenied ? "Hand tracking is off" : "Controller tracking is off")
                         .font(.title3.weight(.semibold))
                     Button("Open Settings") {
                         if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                     }
                     .buttonStyle(.bordered)
                     .padding(.top, 4)
+                case .handTrackingUnavailable:
+                    Text("Hand tracking is unavailable")
+                        .font(.title3.weight(.semibold))
+                    Text("Use a supported Vision Pro or choose PS VR2 Sense.")
+                        .font(.callout).foregroundStyle(.secondary)
+                case .senseUnavailable:
+                    Text("Sense controllers need visionOS 26 or later")
+                        .font(.title3.weight(.semibold))
+                    Text("Choose Hands or update visionOS.")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
             }
         }

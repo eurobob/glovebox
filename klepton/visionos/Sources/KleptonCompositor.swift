@@ -423,7 +423,11 @@ final class KleptonCompositor {
     private let handsWanted = false
     #else
     private let handTracking = HandTrackingProvider()
+    #if KL_ALYX_LAUNCHER
+    private let handsWanted = HandTrackingProvider.isSupported && KleptonHandInput.enabled
+    #else
     private let handsWanted = HandTrackingProvider.isSupported && klEnvOn("KL_HANDS", default: true)
+    #endif
     #endif
     private let controllers = KleptonControllers()
     private var arRunning = false
@@ -750,12 +754,18 @@ final class KleptonCompositor {
     /// with this frame's pose rather than the previous one's — the same
     /// ordering reason the Choreographer is ticked before nativeRender.
     private func updatePoses(at presentationTime: TimeInterval) {
-        guard arRunning else { return }
+        guard arRunning else {
+            if KleptonHandInput.enabled {
+                controllers.update(leftHand: nil, rightHand: nil, at: presentationTime)
+            }
+            return
+        }
 
         // Predicted to the presentation time, not "now": the pose the guest
         // renders with should be the pose the display will show it at, which is
         // the whole point of having a deadline to render against.
-        if let anchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime) {
+        let headAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
+        if let anchor = headAnchor {
             // This is the pose the guest will render with, and kl_ovrp latches
             // it into the stage record when the guest reaches ovrp_BeginFrame —
             // which is what the composite pass reads back to know where the
@@ -785,7 +795,7 @@ final class KleptonCompositor {
         // at ARKitSession.run — so a changed set means rebuilding the accessory
         // provider and running the session again. Not a restart: world and hand
         // tracking carry on untouched.
-        if controllers.spatialControllersChanged() {
+        if !KleptonHandInput.enabled && controllers.spatialControllersChanged() {
             NSLog("[cp] spatial controller set changed — rebuilding providers")
             // The old provider's anchors are about to stop arriving; drop what
             // it left behind so a disconnected controller cannot hold its last
@@ -814,7 +824,8 @@ final class KleptonCompositor {
             if let a = hands.rightHand, a.isTracked { right = a }
         }
         #endif
-        controllers.update(leftHand: left, rightHand: right, at: presentationTime)
+        controllers.update(leftHand: left, rightHand: right, at: presentationTime,
+                           head: headAnchor?.isTracked == true ? headAnchor?.originFromAnchorTransform : nil)
         // ...and the same seam in the other direction: whatever the guest
         // queued for the controllers to play. Here rather than inside `update`
         // because it has nothing to do with the anchors that call takes — it is
@@ -1872,8 +1883,10 @@ final class KleptonCompositor {
         loop: while true {
             switch layerRenderer.state {
             case .invalidated:
+                controllers.suspendHandInput()
                 break loop
             case .paused:
+                controllers.suspendHandInput()
                 NSLog("[cp] layer paused at iteration \(iterations) — waiting")
                 layerRenderer.waitUntilRunning()
                 NSLog("[cp] layer running again")

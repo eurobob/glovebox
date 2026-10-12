@@ -6,14 +6,26 @@
 It runs on the headset itself: no PC, no streaming. Glovebox builds it on your Mac from the copy you own and
 installs it on your headset.
 
+This fork adds **experimental hand controls** alongside PS VR2 Sense. Choose **Hands (Experimental)**
+or **PS VR2 Sense** in the headset launcher; Hands is the default. Hand controls have not yet been
+validated in hardware gameplay. Upstream Glovebox remains Sense-only.
+[Hand controls and custom build instructions](docs/HAND-CONTROLS.md).
+
 ## You need
 
-- **Apple Vision Pro** on visionOS 26, with about 75 GB free (tested on M5 and M2)
-- **PlayStation VR2 Sense controllers**
+- **Apple Vision Pro** on visionOS 26, with about 75 GB free (upstream tested on M5 and M2)
+- **PlayStation VR2 Sense controllers** for upstream Glovebox or this fork's Sense mode; this fork's
+  experimental Hands mode uses ARKit hand tracking
 - **Half-Life: Alyx** in your Steam library
 - **A Mac with Apple silicon**, with Xcode
 
 ## Install
+
+For this fork, follow the [custom build and update guide](docs/HAND-CONTROLS.md#build-and-update-this-fork).
+It reuses your original Glovebox build's cached game files and runtime kit. Install with the same
+team and bundle ID to preserve game data and saves; **do not uninstall the existing app**.
+
+### Original Glovebox (Sense controllers)
 
 1. **[Download the Glovebox app](https://github.com/glovebox-vr/glovebox/releases/latest/download/Glovebox.dmg)** and open it.
 2. **Follow along.** It sets up Xcode, your headset and Steam, then builds the game and installs it on your
@@ -21,10 +33,11 @@ installs it on your headset.
 3. **Put on your headset and open the game.** The rest of the game downloads straight to the headset, with your
    Steam Cloud saves.
 
-The app keeps itself and the game up to date.
+The original Mac app keeps itself and the game up to date. Its **Update** or **Renew** replaces this
+fork with the upstream Sense-only build. Use the custom build guide to retain hand controls.
 
 <details>
-<summary>From Terminal</summary>
+<summary>Upstream's standard Terminal workflow</summary>
 
 ```sh
 xcrun python3 engine/glovebox.py doctor    # what this Mac and headset still need
@@ -38,7 +51,8 @@ xcrun python3 engine/glovebox.py install   # onto your paired Vision Pro
 Steam's copy of Half-Life: Alyx includes a native 64-bit ARM Linux build. [Klepton](https://github.com/shinyquagsire23/Klepton)
 converts its libraries into signed Vision Pro code on your Mac, and runs the game against Apple's frameworks:
 Vulkan through MoltenVK, the displays through Compositor Services, the Sense controllers through Game Controller
-and ARKit. The game's graphics pipelines are rebuilt from your own copy and compiled ahead of time, so shader
+and ARKit. This fork also maps ARKit hand gestures to the game's controller inputs. It uses the ARM64 Linux
+build, with no Wine dependency. The game's graphics pipelines are rebuilt from your own copy and compiled ahead of time, so shader
 compiling stays out of play. The whole story: [How it works](docs/HOW-IT-WORKS.md).
 
 Questions: [FAQ](docs/FAQ.md) · Problems: [Known issues](docs/KNOWN-ISSUES.md)

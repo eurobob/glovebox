@@ -13,10 +13,13 @@ struct LibraryView: View {
     @State private var firstTime = false
     @State private var showShareAsk = false
     @State private var showLicenses = false
+    @State private var showControls = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 36) {
             GameTitle(title: model.profile.title, size: 60)
+
+            inputControls
 
             // A fixed height, so the title stays put when the one-line status becomes the taller
             // download progress.
@@ -69,6 +72,7 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $showLicenses) { LicensesSheet() }
+        .sheet(isPresented: $showControls) { InputControlsSheet(mode: model.inputMode) }
         .clipped()
         .onAppear {
             drift = true
@@ -91,6 +95,32 @@ struct LibraryView: View {
         return 1
     }
 
+    private var inputControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 16) {
+                Picker("Input", selection: $model.inputMode) {
+                    ForEach(LauncherInputMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 460)
+                .disabled(model.requestingTrackingPermission || model.launching || model.preparing != nil)
+                Button { showControls = true } label: {
+                    Label("Controls", systemImage: "questionmark.circle")
+                }
+                .buttonStyle(.bordered)
+            }
+            if model.inputMode == .hands {
+                Text("Experimental gestures. Keep both hands visible to the headset.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Text("Both PS VR2 Sense controllers must be connected.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     /// Which button is showing, for the hand-off animation between them (not every progress tick).
     private var stage: String {
         switch model.install {
@@ -101,6 +131,7 @@ struct LibraryView: View {
         case .installed(true): return "update"
         case .installed(false):
             if model.preparing != nil { return "preparing" }
+            if model.requestingTrackingPermission { return "permission" }
             if model.launching { return "launching" }
             return model.controllerIssue == nil ? "play" : "controllers"
         case .failed: return "failed"
@@ -133,15 +164,15 @@ struct LibraryView: View {
                     .bigButton()
             } else {
                 // The white pill, a soft glow and the boldest type on the page: the moment it's all for.
-                // Without both controllers it waits, unlit, and lights up by itself when they're on.
-                let busy = model.launching || model.preparing != nil
+                // Play waits for the selected input mode to be ready.
+                let busy = model.requestingTrackingPermission || model.launching || model.preparing != nil
                 let ready = model.controllerIssue == nil
                 Button { model.play(onPlay) } label: {
                     if busy { spinner }
                     else { actionLabel("Play", "play.fill", weight: .bold) }
                 }
                 .bigButton()
-                .disabled(!ready || model.preparing != nil)
+                .disabled(!ready || busy)
                 .shadow(color: .white.opacity(ready && !busy ? 0.35 : 0), radius: 22)
             }
         }
@@ -178,6 +209,9 @@ struct LibraryView: View {
         case .installed(updateAvailable: false):
             if let preparing = model.preparing {
                 PreparingStatus(preparing: preparing)
+            } else if model.requestingTrackingPermission {
+                Label("Allow tracking to continue", systemImage: "hand.raised")
+                    .font(.title3).foregroundStyle(.secondary)
             } else if model.launching {
                 Label("Getting your latest saves", systemImage: "icloud.and.arrow.down").font(.title3).foregroundStyle(.secondary)
             } else if let issue = model.controllerIssue {
@@ -199,6 +233,7 @@ struct LibraryView: View {
 
     private var accountMenu: some View {
         Menu {
+            Button("Controls") { showControls = true }
             Toggle("Help Improve Glovebox", isOn: Binding(get: { model.shareStutters ?? false },
                                                           set: { model.setShareStutters($0) }))
             Button("Licenses") { showLicenses = true }

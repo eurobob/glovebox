@@ -286,6 +286,7 @@ if _icon_layers:
 # renderer adds. A list rather than an id pair each, for the same reason
 # the guest libraries are one.
 SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
+         "KleptonHandInput.swift", "KleptonHandGestures.swift", "KleptonHandMotion.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift"]

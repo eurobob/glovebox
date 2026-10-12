@@ -42,7 +42,14 @@ final class LauncherModel: ObservableObject {
     @Published var buildID: UInt64 = 0
     /// True while saves sync right before the game starts.
     @Published var launching = false
-    /// The PS VR2 Sense controllers: how many are on, and whether the app may track them (Controllers.swift).
+    @Published var requestingTrackingPermission = false
+    @Published var inputMode = LauncherInputMode.saved {
+        didSet {
+            UserDefaults.standard.set(inputMode.rawValue, forKey: LauncherInputMode.defaultsKey)
+            refreshControllerAccess()
+        }
+    }
+    /// Permissions for hands and Sense, plus connected controllers (Controllers.swift).
     @Published var controllers = ControllerState()
     /// Set by the game app between Play and the game's first frame, while the game gets ready (the
     /// first launch prepares its graphics). The page shows it in place of Play; nil hides it. Set it
@@ -84,6 +91,7 @@ final class LauncherModel: ObservableObject {
     init(profile: GameProfile = .halfLifeAlyx, installRoot: URL = LauncherModel.defaultInstallRoot) {
         self.profile = profile
         self.launcher = SteamLauncher(profile: profile, installRoot: installRoot)
+        UserDefaults.standard.set(inputMode.rawValue, forKey: LauncherInputMode.defaultsKey)
         if let demo = DemoState.current {
             demo.apply(to: self)
         } else {
@@ -300,7 +308,7 @@ final class LauncherModel: ObservableObject {
         case .active:
             isActive = true
             if resumeWhenActive { startInstall() }
-            // Back from Settings, controller tracking may have just been turned on.
+            // Back from Settings, tracking may have just been turned on.
             refreshControllerAccess()
         case .background:
             isActive = false
@@ -376,13 +384,19 @@ final class LauncherModel: ObservableObject {
         }
     }
 
-    /// Play: the controller permission first (the system asks here, not as the game starts), then
+    /// Play: the selected tracking permission first (the system asks here, not as the game starts), then
     /// finish any running sync, pull the latest saves (max ~15 s), and start the game.
     func play(_ start: @escaping () -> Void) {
         guard playTask == nil, !launching, preparing == nil, controllerIssue == nil else { return }
+        let selectedMode = inputMode
+        requestingTrackingPermission = true
         playTask = Task {
-            defer { playTask = nil }
-            guard await allowControllerTracking() else { return }
+            defer {
+                requestingTrackingPermission = false
+                playTask = nil
+            }
+            guard await allowControllerTracking(), inputMode == selectedMode, controllerIssue == nil else { return }
+            requestingTrackingPermission = false
             launching = true
             await saveSync?.value
             let sync = Task { await syncSaves() }

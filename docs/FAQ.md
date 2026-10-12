@@ -2,7 +2,9 @@
 
 ### Do I need a paid developer account?
 
-No. A free Apple Account works: sign in to Xcode with it and Glovebox builds with its Personal Team. The game needs about 6 to 8 GB of memory, and Apple gives free teams the Increased Memory Limit capability that allows it. The difference is how long an install lasts: 7 days with a free account, a year with the paid Developer Program ($99 a year). See "Does the app expire?".
+Upstream Glovebox supports a free Apple Account: sign in to Xcode with it and Glovebox builds with its Personal Team. The game needs about 6 to 8 GB of memory, and Apple gives free teams the Increased Memory Limit capability that allows it. The difference is how long an install lasts: 7 days with a free account, a year with the paid Developer Program ($99 a year). See "Does the app expire?".
+
+This fork's current custom-build helper is configured for a **paid Developer Program team**. Use the same paid team as the existing installation; the upstream Personal Team workflow is not yet supported by this helper.
 
 ### Why not TestFlight or the App Store?
 
@@ -16,9 +18,17 @@ No. You need Half-Life: Alyx on your own Steam account. Steam itself refuses to 
 
 No. The game runs on the headset's own chip. The Mac is only needed to build and install the app.
 
+### Does it use Wine?
+
+No. Klepton converts the game's ARM64 Linux libraries into signed visionOS code and supplies the runtime interfaces they need. This is the Linux build of Alyx, not its Windows executable. See [How it works](HOW-IT-WORKS.md).
+
 ### Which controllers work?
 
-PS VR2 Sense controllers. Half-Life: Alyx needs buttons, sticks and triggers, so hand tracking alone isn't supported.
+Upstream Glovebox supports PS VR2 Sense controllers. This fork also offers **Hands (Experimental)**, which maps hand gestures to triggers, grip, sticks and buttons. Hands is the default; the launcher remembers your selection. Sense mode still requires both controllers. Hand controls have not yet been validated in hardware gameplay. See [the controls and limitations](HAND-CONTROLS.md), or open **Controls** before Play.
+
+### Will Update or Renew keep this fork's hand controls?
+
+The original Mac installer's **Update** and **Renew** install upstream Glovebox and restore its Sense-only controls. To keep this fork, use its [custom build and update steps](HAND-CONTROLS.md#build-and-update-this-fork). Reuse the existing app's team and bundle ID, and install over it without uninstalling; this preserves its game files and saves.
 
 ### How long does installing take?
 

@@ -412,6 +412,10 @@ struct KLSenseTune {
 }
 
 final class KleptonControllers {
+    private let experimentalHands = KleptonHandInput.enabled
+    private var handGestures = [KleptonHandGestures(), KleptonHandGestures()]
+    private var handMotion = [KleptonHandMotion(), KleptonHandMotion()]
+    private var loggedHandBuild = false
     // 0 = left, 1 = right, matching kl_ovrp's hand indices (nodes 3 and 4).
     private var state: [KleptonHandState] = [KleptonHandState(), KleptonHandState()]
 
@@ -478,6 +482,7 @@ final class KleptonControllers {
     /// session is simply re-`run()` with a rebuilt list when the set changes
     /// (`spatialControllersChanged`), without stopping it first.
     func makeAccessoryProvider() async -> (any DataProvider)? {
+        guard !experimentalHands else { return nil }
         guard #available(visionOS 26.0, *), AccessoryTrackingProvider.isSupported else { return nil }
         let spatial = Self.spatialControllers()
         tracked = spatial
@@ -1731,7 +1736,11 @@ final class KleptonControllers {
     /// pose here is predicted to it, so the controllers move at display rate
     /// and describe the same instant the head pose does.
     func update(leftHand: HandAnchor?, rightHand: HandAnchor?,
-                at presentationTime: TimeInterval) {
+                at presentationTime: TimeInterval, head: simd_float4x4? = nil) {
+        if experimentalHands {
+            updateGestureHands(left: leftHand, right: rightHand, head: head, at: presentationTime)
+            return
+        }
         pollButtons()
 
         for hand in 0...1 {
@@ -1825,5 +1834,77 @@ final class KleptonControllers {
             lock.lock(); state[hand] = st; lock.unlock()
         }
         reportPinch()
+    }
+
+    /// Called on the compositor thread before waiting or ending the immersive
+    /// session. Resuming with a closed hand must require a new neutral pose.
+    func suspendHandInput() {
+        guard experimentalHands else { return }
+        updateGestureHands(left: nil, right: nil, head: nil, at: CACurrentMediaTime())
+    }
+
+    private func releaseGestureHand(_ hand: Int, at time: TimeInterval) {
+        handMotion[hand].reset()
+        _ = handGestures[hand].update(sample: nil, at: time, hand: hand)
+        pinchHeld[hand] = false
+        lock.lock(); let previous = state[hand]; lock.unlock()
+        var stopped = KleptonHandState()
+        stopped.position = previous.position; stopped.orientation = previous.orientation
+        // A release cannot carry the last sample's throw velocity through a
+        // dropout, malformed pose, or compositor suspension.
+        if let p = previous.position, let q = previous.orientation {
+            kl_ovrp_set_hand_motion(Int32(hand), p.x, p.y, p.z,
+                q.imag.x, q.imag.y, q.imag.z, q.real, 0, 0, 0, 0, 0, 0)
+        }
+        kl_ovrp_set_controller_input(Int32(hand), 0, 0, 0, 0, 0, 0)
+        lock.lock(); state[hand] = stopped; lock.unlock()
+    }
+
+    /// A complete input source: no system pinch events or controller snapshots
+    /// are mixed into gestures, so a cancelled gesture cannot remain pressed.
+    private func updateGestureHands(left: HandAnchor?, right: HandAnchor?,
+                                    head: simd_float4x4?, at time: TimeInterval) {
+        if !loggedHandBuild {
+            let stamp = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "dev"
+            NSLog("[hands] experimental input, build \(stamp)")
+            loggedHandBuild = true
+        }
+        for hand in 0...1 {
+            let anchor = hand == 0 ? left : right
+            let sample = anchor.flatMap { KleptonHandInput.sample($0, head: head) }
+            let output = handGestures[hand].update(sample: sample, at: time, hand: hand)
+            guard sample != nil, let anchor else {
+                releaseGestureHand(hand, at: time)
+                continue
+            }
+            let (p, q) = gripPose(anchor, hand: hand)
+            guard p.x.isFinite, p.y.isFinite, p.z.isFinite,
+                  q.vector.x.isFinite, q.vector.y.isFinite,
+                  q.vector.z.isFinite, q.vector.w.isFinite else {
+                releaseGestureHand(hand, at: time)
+                continue
+            }
+            let motion = handMotion[hand].update(position: p, orientation: q, at: time)
+            var st = KleptonHandState()
+            st.position = p; st.orientation = q
+            st.linearVelocity = motion.linear; st.angularVelocity = motion.angular
+            st.indexTrigger = output.trigger; st.handTrigger = output.grip
+            st.stick = output.stick
+            if output.trigger > 0 { st.buttons |= hand == 0 ? OVRPRawButton.lIndexTrigger : OVRPRawButton.rIndexTrigger }
+            if output.grip > 0 { st.buttons |= hand == 0 ? OVRPRawButton.lHandTrigger : OVRPRawButton.rHandTrigger }
+            if output.primary { st.buttons |= hand == 0 ? OVRPRawButton.x : OVRPRawButton.a }
+            if output.secondary { st.buttons |= hand == 0 ? OVRPRawButton.y : OVRPRawButton.b }
+            if output.stickClick { st.buttons |= hand == 0 ? OVRPRawButton.lThumbstick : OVRPRawButton.rThumbstick }
+            if output.menu && hand == 0 { st.buttons |= OVRPRawButton.start }
+            st.touches = st.buttons
+            pinchHeld[hand] = output.trigger > 0 || output.grip > 0
+            kl_ovrp_set_hand_motion(Int32(hand), p.x, p.y, p.z,
+                q.imag.x, q.imag.y, q.imag.z, q.real,
+                motion.linear.x, motion.linear.y, motion.linear.z,
+                motion.angular.x, motion.angular.y, motion.angular.z)
+            kl_ovrp_set_controller_input(Int32(hand), st.buttons, st.touches,
+                st.indexTrigger, st.handTrigger, st.stick.x, st.stick.y)
+            lock.lock(); state[hand] = st; lock.unlock()
+        }
     }
 }
