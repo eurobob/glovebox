@@ -14,8 +14,13 @@ enum KleptonHandInput {
     }
 
     static func sample(_ anchor: HandAnchor, head: simd_float4x4?) -> KleptonGestureSample? {
-        guard anchor.isTracked, let skeleton = anchor.handSkeleton, let head else { return nil }
+        guard anchor.isTracked else { return nil }
+        let p = anchor.originFromAnchorTransform.columns.3
+        let position = SIMD3<Float>(p.x, p.y, p.z)
+        guard position.x.isFinite, position.y.isFinite, position.z.isFinite else { return nil }
+
         func point(_ name: HandSkeleton.JointName) -> SIMD3<Float>? {
+            guard let skeleton = anchor.handSkeleton else { return nil }
             let joint = skeleton.joint(name)
             guard joint.isTracked else { return nil }
             let p = joint.anchorFromJointTransform.columns.3
@@ -31,25 +36,32 @@ enum KleptonHandInput {
                   simd_length(b - a) > 0.001, simd_length(d - c) > 0.001 else { return nil }
             return max(0, min(1, (1 - simd_dot(simd_normalize(b - a), simd_normalize(d - c))) * 0.5))
         }
-        guard let thumb = point(.thumbTip), let index = point(.indexFingerTip),
-              let middle = point(.middleFingerTip), let ring = point(.ringFingerTip),
-              let little = point(.littleFingerTip),
-              let mc = curl(.middleFingerKnuckle, .middleFingerIntermediateBase, .middleFingerIntermediateTip, .middleFingerTip),
-              let rc = curl(.ringFingerKnuckle, .ringFingerIntermediateBase, .ringFingerIntermediateTip, .ringFingerTip),
-              let lc = curl(.littleFingerKnuckle, .littleFingerIntermediateBase, .littleFingerIntermediateTip, .littleFingerTip)
-        else { return nil }
-        let p = anchor.originFromAnchorTransform.columns.3
-        let right = head.columns.0
-        let forward = -head.columns.2
+        let thumb = point(.thumbTip)
+        func distance(to finger: HandSkeleton.JointName) -> Float? {
+            guard let thumb, let tip = point(finger) else { return nil }
+            return simd_distance(thumb, tip)
+        }
+        let mc = curl(.middleFingerKnuckle, .middleFingerIntermediateBase, .middleFingerIntermediateTip, .middleFingerTip)
+        let rc = curl(.ringFingerKnuckle, .ringFingerIntermediateBase, .ringFingerIntermediateTip, .ringFingerTip)
+        let lc = curl(.littleFingerKnuckle, .littleFingerIntermediateBase, .littleFingerIntermediateTip, .littleFingerTip)
+        func facePinch(_ finger: HandSkeleton.JointName, others: (Float?, Float?)) -> Float? {
+            // Unknown or folded neighbouring fingers cannot classify a button
+            // gesture. They must not cancel an independently tracked index pinch.
+            guard let a = others.0, let b = others.1, a < 0.5, b < 0.5 else { return nil }
+            return distance(to: finger)
+        }
+        let grip: Float?
+        if let mc, let rc, let lc { grip = min(mc, rc, lc) } else { grip = nil }
+        // A head sample is only needed to start a movement clutch. A missing
+        // prediction, or looking vertically, must not disable menu selection.
+        let right = head.map { SIMD3<Float>($0.columns.0.x, 0, $0.columns.0.z) } ?? .zero
+        let forward = head.map { SIMD3<Float>(-$0.columns.2.x, 0, -$0.columns.2.z) } ?? .zero
         return KleptonGestureSample(
-            indexPinch: simd_distance(thumb, index),
-            // A thumb touching a folded finger during a fist is not a button.
-            middlePinch: rc < 0.5 && lc < 0.5 ? simd_distance(thumb, middle) : 0.2,
-            ringPinch: mc < 0.5 && lc < 0.5 ? simd_distance(thumb, ring) : 0.2,
-            littlePinch: mc < 0.5 && rc < 0.5 ? simd_distance(thumb, little) : 0.2,
-            gripCurl: min(mc, rc, lc),
-            position: SIMD3<Float>(p.x, p.y, p.z),
-            stickRight: SIMD3<Float>(right.x, 0, right.z),
-            stickForward: SIMD3<Float>(forward.x, 0, forward.z))
+            indexPinch: distance(to: .indexFingerTip),
+            middlePinch: facePinch(.middleFingerTip, others: (rc, lc)),
+            ringPinch: facePinch(.ringFingerTip, others: (mc, lc)),
+            littlePinch: facePinch(.littleFingerTip, others: (mc, rc)),
+            gripCurl: grip, position: position,
+            stickRight: right, stickForward: forward)
     }
 }

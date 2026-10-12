@@ -7,6 +7,9 @@ struct HandGestureTests {
 
     static func main() {
         startupAndDebounce()
+        partialTracking()
+        headingAvailability()
+        quickIndexPress()
         exclusivityAndHysteresis()
         gripAndTrigger()
         navigationDoesNotGrab()
@@ -19,9 +22,9 @@ struct HandGestureTests {
         print("Hand gestures: \(checks) checks passed")
     }
 
-    private static func sample(index: Float = 0.08, middle: Float = 0.08,
-                               ring: Float = 0.08, little: Float = 0.08,
-                               curl: Float = 0, position: SIMD3<Float> = .zero,
+    private static func sample(index: Float? = 0.08, middle: Float? = 0.08,
+                               ring: Float? = 0.08, little: Float? = 0.08,
+                               curl: Float? = 0, position: SIMD3<Float> = .zero,
                                right: SIMD3<Float> = SIMD3(1, 0, 0),
                                forward: SIMD3<Float> = SIMD3(0, 0, -1))
         -> KleptonGestureSample {
@@ -61,13 +64,134 @@ struct HandGestureTests {
         _ = gestures.update(sample: sample(), at: 2, hand: 0)
         expect(neutral(gestures.update(sample: sample(index: 0.02), at: 2.01, hand: 0)),
                "Pinch requires debounce")
-        expect(neutral(gestures.update(sample: sample(index: 0.024), at: 2.04, hand: 0)),
+        expect(neutral(gestures.update(sample: sample(index: 0.040), at: 2.025, hand: 0)),
                "Threshold jitter cancels candidate")
         _ = gestures.update(sample: sample(index: 0.02), at: 2.05, hand: 0)
-        expect(neutral(gestures.update(sample: sample(index: 0.02), at: 2.09, hand: 0)),
+        expect(neutral(gestures.update(sample: sample(index: 0.02), at: 2.065, hand: 0)),
                "Candidate must stay below down threshold")
-        expect(gestures.update(sample: sample(index: 0.02), at: 2.11, hand: 0).trigger == 1,
+        expect(gestures.update(sample: sample(index: 0.02), at: 2.08, hand: 0).trigger == 1,
                "Stable pinch fires")
+    }
+
+    private static func partialTracking() {
+        var gestures = KleptonHandGestures()
+        let indexOnlyOpen = sample(middle: nil, ring: nil, little: nil, curl: nil,
+                                   right: .zero, forward: .zero)
+        var indexOnlyPinch = indexOnlyOpen
+        indexOnlyPinch.indexPinch = 0.038
+        _ = gestures.update(sample: indexOnlyOpen, at: 0, hand: 0)
+        _ = gestures.update(sample: indexOnlyPinch, at: 0.1, hand: 0)
+        expect(gestures.update(sample: indexOnlyPinch, at: 0.122, hand: 0).trigger == 1,
+               "Thumb/index alone can arm and select without other fingers, curl or heading")
+        var occluded = sample(index: 0.038, little: nil, curl: nil)
+        expect(gestures.update(sample: occluded, at: 0.14, hand: 0).trigger == 1,
+               "Missing pinky or curl cannot reset an active index pinch")
+        occluded.indexPinch = nil
+        expect(neutral(gestures.update(sample: occluded, at: 0.15, hand: 0)),
+               "Missing index immediately cancels even its minimum press pulse")
+        expect(neutral(gestures.update(sample: indexOnlyPinch, at: 0.16, hand: 0)),
+               "Reacquired closed index cannot restart fire")
+        expect(neutral(gestures.update(sample: indexOnlyPinch, at: 1, hand: 0)),
+               "Held reacquisition stays unarmed despite unrelated open fingers")
+        _ = gestures.update(sample: indexOnlyOpen, at: 1.1, hand: 0)
+        _ = gestures.update(sample: indexOnlyPinch, at: 1.2, hand: 0)
+        expect(gestures.update(sample: indexOnlyPinch, at: 1.222, hand: 0).trigger == 1,
+               "Only index needs an observed open sample to rearm index")
+
+        var grip = KleptonHandGestures()
+        _ = grip.update(sample: sample(curl: 0.95), at: 0, hand: 0)
+        expect(grip.update(sample: sample(curl: 0.95), at: 0.1, hand: 0).grip == 0,
+               "Initial closed fist must relax before grabbing")
+        _ = grip.update(sample: sample(), at: 0.2, hand: 0)
+        _ = grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.3, hand: 0)
+        let both = grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.36, hand: 0)
+        expect(both.grip == 1 && both.trigger == 1, "Rearmed grip combines with index")
+        let lostCurl = grip.update(sample: sample(index: 0.038, curl: nil), at: 0.37, hand: 0)
+        expect(lostCurl.grip == 0 && lostCurl.trigger == 1, "Lost curl releases grip only")
+        expect(grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.5, hand: 0).grip == 0,
+               "Grip reacquisition while curled cannot restart a grab")
+        _ = grip.update(sample: sample(index: 0.038), at: 0.6, hand: 0)
+        _ = grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.7, hand: 0)
+        expect(grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.76, hand: 0).grip == 1,
+               "Known relaxed curl rearms grip while index remains pressed")
+
+        var left = armed()
+        _ = left.update(sample: sample(little: 0.01), at: 0.1, hand: 0)
+        _ = left.update(sample: sample(little: 0.01), at: 0.16, hand: 0)
+        expect(neutral(left.update(sample: sample(little: nil), at: 0.2, hand: 0)),
+               "Losing little finger cancels without synthesizing Y or menu")
+        expect(neutral(left.update(sample: sample(little: 0.01), at: 1, hand: 0)),
+               "Closed little-finger reacquisition does not start a long hold")
+    }
+
+    private static func headingAvailability() {
+        var grip = armed()
+        _ = grip.update(sample: sample(curl: 0.95, right: .zero, forward: .zero), at: 0.1, hand: 0)
+        expect(grip.update(sample: sample(curl: 0.95, right: .zero, forward: .zero), at: 0.16, hand: 0).grip == 1,
+               "Grip does not depend on a head heading")
+        var face = armed()
+        _ = face.update(sample: sample(ring: 0.01, right: .zero, forward: .zero), at: 0.1, hand: 0)
+        expect(face.update(sample: sample(ring: 0.01, right: .zero, forward: .zero), at: 0.16, hand: 0).primary,
+               "Face buttons do not depend on a head heading")
+        var stick = armed()
+        _ = stick.update(sample: sample(index: 0.038, middle: 0.01, right: .zero, forward: .zero), at: 0.1, hand: 0)
+        expect(neutral(stick.update(sample: sample(index: 0.038, middle: 0.01, right: .zero, forward: .zero), at: 0.2, hand: 0)),
+               "A middle clutch cannot start without heading or fall through into an accidental index press")
+        _ = stick.update(sample: sample(middle: 0.01), at: 0.3, hand: 0)
+        _ = stick.update(sample: sample(middle: 0.01), at: 0.36, hand: 0)
+        let moving = stick.update(sample: sample(middle: 0.01, position: SIMD3(0.08, 0, 0),
+                                                  right: .zero, forward: .zero), at: 0.4, hand: 0)
+        expect(moving.stick.x > 0.99,
+               "An active clutch uses its frozen heading through head unavailability")
+        expect(neutral(stick.update(sample: sample(middle: nil), at: 0.41, hand: 0)),
+               "Losing the middle channel immediately stops movement")
+        expect(neutral(stick.update(sample: sample(middle: 0.01, position: SIMD3(1, 0, 0)), at: 0.5, hand: 0)),
+               "Middle reacquisition while pinched cannot restart movement")
+    }
+
+    private static func quickIndexPress() {
+        var gestures = armed()
+        _ = gestures.update(sample: sample(index: 0.040), at: 0.1, hand: 0)
+        expect(gestures.update(sample: sample(index: 0.040), at: 0.2, hand: 0).trigger == 0,
+               "Index does not activate above its calibrated 39 mm threshold")
+        _ = gestures.update(sample: sample(index: 0.039), at: 0.3, hand: 0)
+        expect(gestures.update(sample: sample(index: 0.039), at: 0.322, hand: 0).trigger == 1,
+               "39 mm index pinch activates after 20 ms")
+        expect(gestures.update(sample: sample(index: 0.043), at: 0.39, hand: 0).trigger == 1,
+               "Accepted index remains down inside the 44 mm release threshold")
+        expect(gestures.update(sample: sample(index: 0.044), at: 0.4, hand: 0).trigger == 0,
+               "44 mm releases an index held longer than the minimum press")
+
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.5, hand: 0)
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.522, hand: 0)
+        expect(gestures.update(sample: sample(), at: 0.53, hand: 0).trigger == 1,
+               "Quick physical release retains the accepted press for guest polling")
+        expect(gestures.update(sample: sample(), at: 0.58, hand: 0).trigger == 1,
+               "Accepted trigger pulse lasts at least 58 ms")
+        expect(gestures.update(sample: sample(), at: 0.583, hand: 0).trigger == 0,
+               "Minimum trigger pulse expires and cannot stick")
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.6, hand: 0)
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.622, hand: 0)
+        expect(neutral(gestures.update(sample: nil, at: 0.63, hand: 0)),
+               "Whole-hand tracking loss cancels a minimum pulse immediately")
+
+        // Model a 45 ms physical pinch at 90 Hz, with every phase of a 45 Hz
+        // guest poll. The former 50 ms debounce rejected this entire gesture.
+        for phase in 0..<20 {
+            var input = KleptonHandGestures()
+            var guestTime = Double(phase) / 20 / 45
+            var observed = false
+            for frame in 0..<30 {
+                let time = Double(frame) / 90
+                let pinched = time >= 0.1 && time < 0.145
+                let output = input.update(sample: sample(index: pinched ? 0.038 : 0.08), at: time, hand: 0)
+                while guestTime < time + 1 / 90.0 {
+                    if output.trigger == 1 { observed = true }
+                    guestTime += 1 / 45.0
+                }
+            }
+            expect(observed, "Quick index selection is visible at every tested 45 Hz polling phase")
+        }
     }
 
     private static func exclusivityAndHysteresis() {
@@ -88,7 +212,7 @@ struct HandGestureTests {
         _ = gestures.update(sample: sample(index: 0.02), at: 0.46, hand: 0)
         expect(gestures.update(sample: sample(index: 0.031), at: 0.5, hand: 0).trigger == 1,
                "Pinch stays down between hysteresis thresholds")
-        expect(neutral(gestures.update(sample: sample(index: 0.033), at: 0.6, hand: 0)),
+        expect(neutral(gestures.update(sample: sample(index: 0.045), at: 0.6, hand: 0)),
                "Open threshold releases trigger")
     }
 
@@ -276,20 +400,29 @@ struct HandGestureTests {
     }
 
     private static func invalidInput() {
-        var badSamples = [sample(index: .nan), sample(index: -0.01), sample(ring: 0.6),
-                          sample(curl: .infinity), sample(curl: 1.1),
+        let badSamples = [sample(index: Float.nan), sample(index: -0.01), sample(index: 0.6),
                           sample(position: SIMD3(.infinity, 0, 0)),
-                          sample(position: SIMD3(1_001, 0, 0)), sample(right: .zero),
-                          sample(forward: SIMD3(0, 1, 0)), sample(forward: SIMD3(1, 0, 0))]
-        badSamples.append(sample(right: SIMD3(.nan, 0, 0)))
+                          sample(position: SIMD3(1_001, 0, 0))]
         for bad in badSamples {
             var gestures = armed()
             _ = gestures.update(sample: sample(index: 0.01), at: 0.1, hand: 0)
             _ = gestures.update(sample: sample(index: 0.01), at: 0.16, hand: 0)
             expect(neutral(gestures.update(sample: bad, at: 0.2, hand: 0)),
-                   "Invalid sample immediately clears all controls")
+                   "Invalid index or whole pose immediately clears trigger")
             expect(neutral(gestures.update(sample: sample(index: 0.01), at: 0.3, hand: 0)),
-                   "Invalid sample requires neutral reacquisition")
+                   "Invalid index or pose requires index neutral reacquisition")
+        }
+        let unrelated = [sample(index: 0.038, ring: 0.6), sample(index: 0.038, curl: Float.infinity),
+                         sample(index: 0.038, curl: 1.1), sample(index: 0.038, right: .zero),
+                         sample(index: 0.038, forward: SIMD3(0, 1, 0)),
+                         sample(index: 0.038, forward: SIMD3(1, 0, 0)),
+                         sample(index: 0.038, right: SIMD3(.nan, 0, 0))]
+        for degraded in unrelated {
+            var gestures = armed()
+            _ = gestures.update(sample: sample(index: 0.038), at: 0.1, hand: 0)
+            _ = gestures.update(sample: sample(index: 0.038), at: 0.122, hand: 0)
+            expect(gestures.update(sample: degraded, at: 0.2, hand: 0).trigger == 1,
+                   "Invalid unrelated channel or heading cannot cancel a valid trigger")
         }
         var gestures = armed()
         expect(neutral(gestures.update(sample: sample(), at: .nan, hand: 0)), "NaN time resets")

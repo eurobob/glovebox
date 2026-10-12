@@ -1,6 +1,7 @@
 # Experimental hand controls
 
-This fork adds hand controls to Glovebox. **Hardware gameplay has not yet been validated.**
+This fork adds hand controls to Glovebox. **Experimental: the first headset playtest reached the game,
+but exposed intermittent tracking and missed menu clicks. The revised input needs another playtest.**
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.
@@ -10,8 +11,8 @@ Hands mode asks for ARKit hand-tracking permission at Play. If access is denied,
 
 ## Gestures
 
-Keep both hands visible to the headset. Start with open hands and separate your thumbs from your
-fingertips. For middle, ring and little finger pinches, keep the other two of those fingers open;
+Keep both hands visible to the headset. Separate your thumb and index finger before pinching to
+select. Aim the in-game hand pointer at a menu item, then pinch and release. For middle, ring and little finger pinches, keep the other two of those fingers open;
 this distinguishes a button press from a fist grip.
 
 | Gesture | Controller input / intended action |
@@ -32,11 +33,15 @@ center. Moving outside the dead zone cancels the hold-to-click action for that p
 
 ## Tracking and limitations
 
-- Startup, tracking loss and compositor pause reset input. After tracking returns or the session
-  resumes, show an open hand before starting another gesture. Returning with a pinch held does not
-  resume the old action.
-- A missing or invalid tracking sample releases that hand's buttons and stick, clears its gesture
-  state, and zeros its motion velocity. Session pause or exit does this for both hands.
+- Each gesture tracks and rearms independently. A missing little-finger joint no longer disables
+  index selection or freezes a tracked hand pose. After a control loses its own tracking, release
+  that gesture before trying it again; a held gesture cannot reactivate on reacquisition.
+- Whole-hand tracking loss or compositor pause still releases all of that hand's controls and
+  zeros its motion velocity. Index selection needs the thumb and index tips, not a head sample or
+  tracking of the other fingers. Heading is only needed to start a movement clutch.
+- Index pinch uses the legacy calibrated 39 mm press / 44 mm release thresholds, a 20 ms debounce,
+  and a 60 ms minimum accepted press so the game's slower input poll can observe a quick click.
+  Losing index tracking cancels even that minimum press immediately.
 - Only one pinch is recognized per hand at a time. Grip can combine with an index trigger, but
   middle/ring/little pinches suppress grip. Relax the fingers before grabbing again.
 - Trigger and grip are on/off controls, not analog pressure. Hands have no controller haptics.

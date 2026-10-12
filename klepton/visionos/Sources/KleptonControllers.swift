@@ -415,6 +415,12 @@ final class KleptonControllers {
     private let experimentalHands = KleptonHandInput.enabled
     private var handGestures = [KleptonHandGestures(), KleptonHandGestures()]
     private var handMotion = [KleptonHandMotion(), KleptonHandMotion()]
+    private var gestureFrames = 0
+    private var gesturePoseFrames = [0, 0]
+    private var gestureIndexFrames = [0, 0]
+    private var gesturePressFrames = [0, 0]
+    private var gestureClosest: [Float] = [.infinity, .infinity]
+    private var gestureNextReport: TimeInterval = 0
     private var loggedHandBuild = false
     // 0 = left, 1 = right, matching kl_ovrp's hand indices (nodes 3 and 4).
     private var state: [KleptonHandState] = [KleptonHandState(), KleptonHandState()]
@@ -1718,8 +1724,8 @@ final class KleptonControllers {
             if unattributed { spatialNoChirality += 1 }
             if !systemPinchSeen {
                 systemPinchSeen = true
-                NSLog("[cp] system pinch events are live — the fingertip-distance "
-                      + "fallback no longer presses anything")
+                NSLog("[cp] system pinch events received (%@)",
+                      experimentalHands ? "experimental per-finger gestures drive game input" : "system and distance trigger sources")
             }
             systemPinch[hand] = active
             lock.unlock()
@@ -1869,6 +1875,7 @@ final class KleptonControllers {
             NSLog("[hands] experimental input, build \(stamp)")
             loggedHandBuild = true
         }
+        gestureFrames += 1
         for hand in 0...1 {
             let anchor = hand == 0 ? left : right
             let sample = anchor.flatMap { KleptonHandInput.sample($0, head: head) }
@@ -1884,6 +1891,12 @@ final class KleptonControllers {
                 releaseGestureHand(hand, at: time)
                 continue
             }
+            gesturePoseFrames[hand] += 1
+            if let distance = sample?.indexPinch, distance.isFinite {
+                gestureIndexFrames[hand] += 1
+                gestureClosest[hand] = min(gestureClosest[hand], distance)
+            }
+            if output.trigger > 0 { gesturePressFrames[hand] += 1 }
             let motion = handMotion[hand].update(position: p, orientation: q, at: time)
             var st = KleptonHandState()
             st.position = p; st.orientation = q
@@ -1906,5 +1919,25 @@ final class KleptonControllers {
                 st.indexTrigger, st.handTrigger, st.stick.x, st.stick.y)
             lock.lock(); state[hand] = st; lock.unlock()
         }
+        reportGestureHands()
+    }
+
+    /// One small diagnostic every five seconds distinguishes pose loss, index
+    /// occlusion and an unrecognised pinch on the next device playtest.
+    private func reportGestureHands() {
+        guard Self.pinchTrace else { return }
+        let now = CACurrentMediaTime()
+        if gestureNextReport == 0 { gestureNextReport = now + 5 }
+        guard now >= gestureNextReport else { return }
+        gestureNextReport = now + 5
+        func summary(_ hand: Int) -> String {
+            let closest = gestureClosest[hand].isFinite
+                ? String(format: "%.1f mm", gestureClosest[hand] * 1000) : "untracked"
+            return "pose \(gesturePoseFrames[hand]), index \(gestureIndexFrames[hand]), trigger \(gesturePressFrames[hand]), closest \(closest)"
+        }
+        NSLog("[hands] %d frames: L %@ | R %@", gestureFrames, summary(0), summary(1))
+        gestureFrames = 0
+        gesturePoseFrames = [0, 0]; gestureIndexFrames = [0, 0]
+        gesturePressFrames = [0, 0]; gestureClosest = [.infinity, .infinity]
     }
 }
