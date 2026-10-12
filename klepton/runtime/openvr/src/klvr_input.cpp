@@ -774,7 +774,10 @@ static vr::EVRInputError pose_at(vr::VRActionHandle_t h, vr::ETrackingUniverseOr
         std::lock_guard<std::mutex> l(g_mu);
         Action *a = action_of(h);
         if (!a) return vr::VRInputError_InvalidHandle;
-        if (a->type != A_Pose && a->type != A_Unknown) return vr::VRInputError_WrongType;
+        // Skeletal actions expose their placement pose through this same API:
+        // callers concatenate it with the parent/model-space bone transforms.
+        if (a->type != A_Pose && a->type != A_Skeleton && a->type != A_Unknown)
+            return vr::VRInputError_WrongType;
         const Binding *b = nullptr;
         hand = bound_hand(*a, restrict_to, &b);
         pose = b ? b->pose : "raw";

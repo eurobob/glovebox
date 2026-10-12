@@ -4,6 +4,7 @@
 //
 // Run from tests/ (the fixtures are relative): make test.
 #include <cmath>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -583,6 +584,74 @@ static void test_input() {
         CHECK(in->GetSkeletalBoneDataCompressed(action, vr::VRSkeletalMotionRange_WithController, packed, sizeof packed, &need) == vr::VRInputError_None);
         CHECK(in->DecompressSkeletalBoneData(packed, need, vr::VRSkeletalTransformSpace_Parent, back, 31) == vr::VRInputError_None);
         CHECK(memcmp(back, live, sizeof back) == 0);
+    }
+
+    // Valve's skeletal placement contract uses the skeletal action itself
+    // with GetPoseActionData, without a device restriction. Check a real
+    // parent-bone -> skeleton pose -> world chain, including noncommuting
+    // wrist/finger rotations and translation, for both hand bindings.
+    for (int h = 0; h < 2; h++) {
+        const auto saved_hand = klvr_null.hand[h];
+        const auto saved_skeleton = klvr_null.skeleton[h];
+        const float half = std::sqrt(0.5f);
+        const float root_x = h ? 0.7f : -0.7f;
+        klvr_null.hand[h].pose = { { root_x, 1.4f, -0.8f }, { 0, half, 0, half } };
+        auto &tracked = klvr_null.skeleton[h];
+        for (int b = 0; b < 31; b++) {
+            float *xf = tracked.bones + 7 * b;
+            for (int i = 0; i < 6; i++) xf[i] = 0;
+            xf[6] = 1;
+        }
+        const float wrist[7] = { 0.01f, -0.02f, 0.03f, 0, 0, half, half };
+        const float metacarpal[7] = { 0.04f, 0.05f, -0.06f, half, 0, 0, half };
+        const float knuckle[7] = { 0.07f, 0.08f, 0.09f, 0, 0, 0, 1 };
+        memcpy(tracked.bones + 7, wrist, sizeof wrist);
+        memcpy(tracked.bones + 6 * 7, metacarpal, sizeof metacarpal);
+        memcpy(tracked.bones + 7 * 7, knuckle, sizeof knuckle);
+        const auto action = h ? skr : skl;
+        CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Parent,
+            vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_None);
+        vr::InputPoseActionData_t skeleton_pose{};
+        CHECK(in->GetPoseActionDataForNextFrame(action, vr::TrackingUniverseStanding,
+            &skeleton_pose, sizeof skeleton_pose, vr::k_ulInvalidInputValueHandle) == vr::VRInputError_None);
+        CHECK(skeleton_pose.bActive && skeleton_pose.pose.bPoseIsValid && skeleton_pose.activeOrigin == (h ? rh : lh));
+        vr::InputPoseActionData_t now_pose{};
+        CHECK(in->GetPoseActionDataRelativeToNow(action, vr::TrackingUniverseStanding, 0,
+            &now_pose, sizeof now_pose, vr::k_ulInvalidInputValueHandle) == vr::VRInputError_None);
+        // The separately bound pointer keeps exactly the same placement.
+        vr::InputPoseActionData_t pointer_pose{};
+        CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0,
+            &pointer_pose, sizeof pointer_pose, h ? rh : lh) == vr::VRInputError_None);
+        const auto &world = skeleton_pose.pose.mDeviceToAbsoluteTracking;
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++) {
+            NEAR(world.m[i][j], now_pose.pose.mDeviceToAbsoluteTracking.m[i][j]);
+            NEAR(world.m[i][j], pointer_pose.pose.mDeviceToAbsoluteTracking.m[i][j]);
+        }
+        // Transform a local point/vector through the returned parent bones.
+        auto in_world = [&](std::array<float, 3> v, bool point) {
+            for (int b : {7, 6, 1, 0}) {
+                const auto &q = live[b].orientation;
+                const float tx = 2 * (q.y * v[2] - q.z * v[1]);
+                const float ty = 2 * (q.z * v[0] - q.x * v[2]);
+                const float tz = 2 * (q.x * v[1] - q.y * v[0]);
+                v = { v[0] + q.w * tx + q.y * tz - q.z * ty,
+                      v[1] + q.w * ty + q.z * tx - q.x * tz,
+                      v[2] + q.w * tz + q.x * ty - q.y * tx };
+                if (point) for (int i = 0; i < 3; i++) v[i] += live[b].position.v[i];
+            }
+            std::array<float, 3> result{};
+            for (int i = 0; i < 3; i++) result[i] = world.m[i][0] * v[0]
+                + world.m[i][1] * v[1] + world.m[i][2] * v[2] + (point ? world.m[i][3] : 0);
+            return result;
+        };
+        const auto position = in_world({0, 0, 0}, true);
+        NEAR(position[0], root_x + 0.05f); NEAR(position[1], 1.49f); NEAR(position[2], -0.85f);
+        const auto x = in_world({1, 0, 0}, false), y = in_world({0, 1, 0}, false), z = in_world({0, 0, 1}, false);
+        NEAR(x[0], 0); NEAR(x[1], 1); NEAR(x[2], 0);
+        NEAR(y[0], 1); NEAR(y[1], 0); NEAR(y[2], 0);
+        NEAR(z[0], 0); NEAR(z[1], 0); NEAR(z[2], -1);
+        klvr_null.hand[h] = saved_hand;
+        klvr_null.skeleton[h] = saved_skeleton;
     }
 
     // Bare-hand poses already use the skeleton root; no Touch raw/grip/tip
