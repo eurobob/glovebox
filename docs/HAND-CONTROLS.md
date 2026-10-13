@@ -25,9 +25,10 @@ The app still opens to the launcher. A completed local installation and saved ac
 immediately; account, ownership and update checks run in the background. Play uses local saves without a new
 network round trip. A pending cloud download cannot replace local saves after game startup begins.
 
-The redundant graphics warm-up before Play is removed. The game's own initialization reuses its persistent
-graphics cache after Play; a spinner covers normal startup, with progress shown if a cold graphics cache
-takes longer to prepare. The immersive space opens only after Play and runtime initialization.
+Build **1013.3.1** also disables the exhaustive shader-archive replay in the game's startup. Normal pipeline
+creation reuses the persistent Metal cache and compiles missing shaders on demand. Play does not repeat the
+local installation check or request tracking permission when it is already granted. A spinner covers actual
+game startup; the immersive space opens only after Play and runtime initialization.
 
 ## Gestures
 

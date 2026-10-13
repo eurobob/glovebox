@@ -101,12 +101,14 @@ extension LauncherModel {
         switch inputMode {
         case .hands:
             guard HandTrackingProvider.isSupported else { return false }
+            if controllers.handAccess == .allowed { return true }
             let status = await Self.arSession.requestAuthorization(for: [.handTracking])
             controllers.handAccess = .init(status[.handTracking])
             return controllers.handAccess == .allowed
         case .sense:
             guard Self.requiresControllers else { return true }
             guard #available(visionOS 26.0, *) else { return false }
+            if controllers.access == .allowed { return true }
             let status = await Self.arSession.requestAuthorization(for: [.accessoryTracking] + Self.alsoAsk)
             controllers.access = .init(status[.accessoryTracking])
             return controllers.access == .allowed

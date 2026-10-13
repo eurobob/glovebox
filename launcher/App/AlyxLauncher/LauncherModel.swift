@@ -562,10 +562,6 @@ final class LauncherModel: ObservableObject {
             }
             guard await allowControllerTracking(), !Task.isCancelled, phase == .library,
                   inputMode == selectedMode, controllerIssue == nil else { return }
-            guard DemoState.current != nil || launcher.playableInstallation != nil else {
-                install = .notInstalled
-                return
-            }
             requestingTrackingPermission = false
             launching = true
             gameStarted = true

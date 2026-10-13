@@ -253,10 +253,12 @@ def defaults(package, work, foz_path, emit):
         f.write("KL_MEM_TOTAL_MB=16384\n")
         # a new player's movement: continuous, hand-oriented
         f.write("KL_ALYX_NEWPLAYER_ARGS=+hlvr_movetype_default 3\n")
-        f.write("KL_VK_FOZ_REPLAY=@demo/demo.foz:@docs/klfz\nKL_VK_FOZ_REPLAY_BLOCK=1\nKL_VK_FOZ_THREADS=6\n"
+        # Start the game directly. Replaying every recorded pipeline holds device creation on
+        # every launch, even after graphics have been prepared. Normal Vulkan pipeline creation
+        # still uses the persistent Metal cache and compiles missing pipelines on demand.
+        f.write("KL_VK_FOZ_REPLAY=0\n"
                 "KL_VK_FOZ_RECORD=auto\n"
-                # the game's own Vulkan device settings (Documents/klfz/device-info.json), for warming the shader cache
-                # before the game starts
+                # Keep device information and recordings available for explicit graphics diagnostics.
                 "KL_VK_DEVICE_INFO=auto\n")
         # the player's answer to "share stutter reports?" from the Mac app (unset: the headset launcher asks)
         share = os.environ.get("GLOVEBOX_SHARE_STUTTERS", "")
