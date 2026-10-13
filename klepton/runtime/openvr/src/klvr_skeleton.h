@@ -10,6 +10,9 @@ int skel_parent(int bone);
 
 // Parent-space transforms.
 void skel_reference(int hand, vr::EVRSkeletalReferencePose which, vr::VRBoneTransform_t out[kBoneCount]);
+// The same reference poses expressed in the native frontend's anatomical
+// palm frame. Controller references and live tracked bones stay unchanged.
+void skel_reference_anatomical(int hand, vr::EVRSkeletalReferencePose which, vr::VRBoneTransform_t out[kBoneCount]);
 // curl[finger] 0 = open .. 1 = closed; fingers are thumb, index, middle, ring, pinky.
 void skel_pose(int hand, const float curl[5], vr::EVRSkeletalMotionRange range, vr::VRBoneTransform_t out[kBoneCount]);
 void skel_to_model(const vr::VRBoneTransform_t parent[kBoneCount], vr::VRBoneTransform_t model[kBoneCount]);

@@ -948,7 +948,8 @@ vr::EVRInputError IVRInput__GetSkeletalReferenceTransforms(void *, vr::VRActionH
     if (e == vr::VRInputError_NoData) hand = 0;
     else if (e) return e;
     vr::VRBoneTransform_t xf[kBoneCount];
-    skel_reference(hand, which, xf);
+    if (klvr_plat_hand_tracking_enabled()) skel_reference_anatomical(hand, which, xf);
+    else skel_reference(hand, which, xf);
     to_space(space, xf);
     memcpy(out, xf, sizeof xf);
     static std::atomic<uint32_t> seen{0};

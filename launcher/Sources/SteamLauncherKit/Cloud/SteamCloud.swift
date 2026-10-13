@@ -535,7 +535,9 @@ public struct CloudSync {
 
     /// One sync: every decision first (from the listing and the files here), then the downloads, then the uploads.
     /// Cancelling it stops before the next file; a file is never half-written, and what's done is recorded.
-    public func run(progress: @escaping @Sendable (Progress) async -> Void = { _ in }) async throws -> Report {
+    public func run(progress: @escaping @Sendable (Progress) async -> Void = { _ in },
+                    writeAccess: CloudSyncWriteAccess? = nil) async throws -> Report {
+        let writeAccess = writeAccess ?? CloudSyncWriteAccess()
         var state = loadState()
         func saveState() throws { try JSONEncoder().encode(state).write(to: stateURL, options: .atomic) }
         var report = Report()
@@ -543,51 +545,55 @@ public struct CloudSync {
 
         await progress(Progress(stage: .checking))
         let remoteByKey = try await listRemote()
-        try prepareLocal(remote: remoteByKey, state: &state, stamp: stamp, report: &report)
-        let localByKey = scanLocal()
         // `setAside`: the headset's copy, kept in the backups before the cloud's replaces it.
         var downloads: [(key: String, file: CloudFile, dest: URL, setAside: Local?)] = []
         // `over`: the cloud version the headset's copy came from, kept in the backups before it's replaced.
         var uploads: [(key: String, name: String, local: Local, over: CloudFile?)] = []
 
-        for key in Set(remoteByKey.keys).union(localByKey.keys).sorted() {
-            let r = remoteByKey[key]
-            let l = localByKey[key].flatMap { read($0.url) }
-            let last = state[key]
-            let rSHA = r?.sha1Hex.lowercased()
+        // Snapshot local inputs under the same gate as relocations. Once Play closes it,
+        // an upload may finish from these immutable copies without reading the running game.
+        try writeAccess.perform {
+            try prepareLocal(remote: remoteByKey, state: &state, stamp: stamp, report: &report)
+            let localByKey = scanLocal()
+            for key in Set(remoteByKey.keys).union(localByKey.keys).sorted() {
+                let r = remoteByKey[key]
+                let l = localByKey[key].flatMap { read($0.url) }
+                let last = state[key]
+                let rSHA = r?.sha1Hex.lowercased()
 
-            if r != nil, let l, l.sha == rSHA {
-                state[key] = l.sha
-                report.unchanged += 1
-                continue
-            }
-            if let r, l == nil {
-                // We synced this exact version before and it's gone here: the game deleted it.
-                // Leave the cloud copy alone rather than bring it back.
-                if let last, last == rSHA { continue }
-                guard let dest = url(forCloudName: r.filename) else { continue }
-                downloads.append((key, r, dest, nil))
-                continue
-            }
-            guard let l else { continue }
-            let staysHere = neverGoesUp(key)
-            guard let r else {
-                if last == l.sha { continue }  // deleted from the cloud elsewhere; don't resurrect it
-                if staysHere { continue }
-                if !self.uploads { report.wouldUpload.append(localByKey[key]!.name); continue }
-                uploads.append((key, localByKey[key]!.name, l, nil))
-                continue
-            }
-            if let last, rSHA == last {
-                // Only the headset changed since the last sync: it goes up under the cloud's own name,
-                // over the very version it came from, and that version is kept first.
-                if staysHere { continue }
-                if !self.uploads { report.wouldUpload.append(r.filename); continue }
-                uploads.append((key, r.filename, l, r))
-            } else {
-                // The cloud changed (alone or as well), or there's no history: the cloud's copy wins,
-                // and the headset's is set aside.
-                downloads.append((key, r, l.url, l))
+                if r != nil, let l, l.sha == rSHA {
+                    state[key] = l.sha
+                    report.unchanged += 1
+                    continue
+                }
+                if let r, l == nil {
+                    // We synced this exact version before and it's gone here: the game deleted it.
+                    // Leave the cloud copy alone rather than bring it back.
+                    if let last, last == rSHA { continue }
+                    guard let dest = url(forCloudName: r.filename) else { continue }
+                    downloads.append((key, r, dest, nil))
+                    continue
+                }
+                guard let l else { continue }
+                let staysHere = neverGoesUp(key)
+                guard let r else {
+                    if last == l.sha { continue }  // deleted from the cloud elsewhere; don't resurrect it
+                    if staysHere { continue }
+                    if !self.uploads { report.wouldUpload.append(localByKey[key]!.name); continue }
+                    uploads.append((key, localByKey[key]!.name, l, nil))
+                    continue
+                }
+                if let last, rSHA == last {
+                    // Only the headset changed since the last sync: it goes up under the cloud's own name,
+                    // over the very version it came from, and that version is kept first.
+                    if staysHere { continue }
+                    if !self.uploads { report.wouldUpload.append(r.filename); continue }
+                    uploads.append((key, r.filename, l, r))
+                } else {
+                    // The cloud changed (alone or as well), or there's no history: the cloud's copy wins,
+                    // and the headset's is set aside.
+                    downloads.append((key, r, l.url, l))
+                }
             }
         }
 
@@ -596,31 +602,39 @@ public struct CloudSync {
             try Task.checkCancellation()
             let data = try await remote.download(d.file)
             try Task.checkCancellation()
-            if let l = d.setAside {
-                report.backedUp.append(try backup(l.data, as: "headset/" + Self.backupPath(d.key), stamp: stamp))
+            try writeAccess.perform {
+                if let l = d.setAside {
+                    report.backedUp.append(try backup(l.data, as: "headset/" + Self.backupPath(d.key), stamp: stamp))
+                }
+                let sha = Codec.sha1(data).hex
+                try writeSafely(data, sha: sha, to: d.dest, time: Date(timeIntervalSince1970: TimeInterval(d.file.timestamp)))
+                state[d.key] = sha
+                report.downloaded.append(d.file.filename)
+                try saveState()
             }
-            let sha = Codec.sha1(data).hex
-            try writeSafely(data, sha: sha, to: d.dest, time: Date(timeIntervalSince1970: TimeInterval(d.file.timestamp)))
-            state[d.key] = sha
-            report.downloaded.append(d.file.filename)
-            try saveState()
             await progress(Progress(stage: .downloading, done: i + 1, total: downloads.count))
         }
 
         if !uploads.isEmpty {
+            try Task.checkCancellation()
             try saveState()
             await progress(Progress(stage: .uploading, total: uploads.count))
+            try Task.checkCancellation()
             for u in uploads {
                 guard let over = u.over else { continue }
                 let old = try await remote.download(over)
+                try Task.checkCancellation()
                 report.backedUp.append(try backup(old, as: "cloud/" + Self.backupPath(u.key), stamp: stamp))
             }
             let count = uploads.count
+            try Task.checkCancellation()
             try await remote.upload(uploads.map { ($0.name, $0.local.data, $0.local.time) }) { done in
                 await progress(Progress(stage: .uploading, done: done, total: count))
             }
             for u in uploads { state[u.key] = u.local.sha; report.uploaded.append(u.name) }
         }
+        // Uploads use immutable pre-Play snapshots. Persist a successful upload's baseline
+        // even after Play, so a new local save next session is not mistaken for a conflict.
         try saveState()
         pruneCloudBackups()
         return report

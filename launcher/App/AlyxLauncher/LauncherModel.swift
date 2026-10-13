@@ -43,7 +43,7 @@ final class LauncherModel: ObservableObject {
     @Published var requiredInstallSpace: UInt64?
     @Published var checkingInstallSpace = false
     @Published var buildID: UInt64 = 0
-    /// True between Play and the game starting, while Play waits for the latest saves (`latestSaves`).
+    /// True after Play while local save writes finish and the game takes over.
     @Published var launching = false
     @Published var requestingTrackingPermission = false
     @Published var inputMode = LauncherInputMode.saved {
@@ -52,7 +52,7 @@ final class LauncherModel: ObservableObject {
             refreshControllerAccess()
         }
     }
-    /// Steam Cloud, as the page shows it: nil until the first sync starts.
+    /// Background Steam Cloud status, retained for diagnostics and design previews.
     @Published var saves: Saves?
     /// Permissions for hands and Sense, plus connected controllers (Controllers.swift).
     @Published var controllers = ControllerState()
@@ -86,14 +86,15 @@ final class LauncherModel: ObservableObject {
     private var plan: SteamLauncher.InstallPlan?
     private var passwordSession: SteamAuthSession?
     private var signInTask: Task<Void, Never>?
+    private var startupTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
     private var spaceRefreshTask: Task<Void, Never>?
     private var backgroundHandoffTask: Task<Void, Never>?
     private var saveSync: Task<Void, Never>?
-    /// The running sync has put every save from the cloud in place; only its uploads are left, so the game may start.
-    private var savesInPlace = false
-    /// When the running sync last moved on (a stage or a file).
-    private var savesMovedAt = Date()
+    private var saveWriteAccess = CloudSyncWriteAccess()
+    private var saveWriteClosure: Task<Void, Never>?
+    private var previousSaveSync: Task<Void, Never>?
+    private var gameStarted = false
     private var playTask: Task<Void, Never>?
     /// Whether the app is in front. Downloads move to the system's background downloader when it isn't.
     private var isActive = false
@@ -116,7 +117,7 @@ final class LauncherModel: ObservableObject {
             demo.apply(to: self)
         } else {
             watchControllers()
-            Task { await start() }
+            startupTask = Task { await start() }
         }
     }
 
@@ -148,7 +149,15 @@ final class LauncherModel: ObservableObject {
         Self.keepOutOfBackup()
         if let creds = Keychain.load() {
             accountName = creds.accountName
-            await finishSignIn(creds)
+            // The successful install receipt and essential files are local. A returning player
+            // does not need Steam to answer before seeing Play, including when offline.
+            let local = launcher.playableInstallation
+            if let local {
+                buildID = local.buildID
+                install = .installed(updateAvailable: false)
+                phase = .library
+            }
+            await finishSignIn(creds, quietly: local != nil)
         } else {
             phase = .signIn
         }
@@ -164,6 +173,7 @@ final class LauncherModel: ObservableObject {
             do {
                 let session = try await launcher.beginPasswordSignIn(account: account, password: password,
                                                                      guardData: Keychain.guardData(for: account))
+                guard !Task.isCancelled else { return }
                 passwordSession = session
                 accountName = account
                 switch session.prompt {
@@ -186,7 +196,10 @@ final class LauncherModel: ObservableObject {
     func submitCode(_ code: String) {
         guard let s = passwordSession else { return }
         Task {
-            do { try await s.submit(code: code) } catch { signInError = Self.friendly(error) }
+            do { try await s.submit(code: code) } catch {
+                guard passwordSession === s else { return }
+                signInError = Self.friendly(error)
+            }
         }
     }
 
@@ -198,33 +211,59 @@ final class LauncherModel: ObservableObject {
         signInStep = .idle
     }
 
-    private func finishSignIn(_ creds: SteamCredentials) async {
+    private func finishSignIn(_ creds: SteamCredentials, quietly: Bool = false) async {
+        guard !Task.isCancelled, !gameStarted else { return }
         var creds = creds
         if creds.accountName.isEmpty { creds.accountName = accountName }
         Keychain.save(creds)
         accountName = creds.accountName
         signInStep = .idle
-        phase = .checkingOwnership
+        if !quietly { phase = .checkingOwnership }
         do {
             try await launcher.logOn(creds)
+            guard !Task.isCancelled, !gameStarted else { return }
             let own = try await launcher.checkOwnership()
+            guard !Task.isCancelled, !gameStarted else { return }
             guard own.owned else { phase = .notOwned; return }
             phase = .library
             // Saves from the last session go up, and saves from other PCs come down, in the background, while the
             // game's build is checked: by the time the player looks for Play they're usually in.
             syncSavesInBackground()
-            await refreshInstall()
+            await refreshInstall(quietly: quietly)
         } catch SteamError.result(let r, _) where r == .invalidPassword || r == .accessDenied || r == .expired {
+            guard !Task.isCancelled, !gameStarted else { return }
             Keychain.clear()
             phase = .signIn
             signInError = "Sign in again"
         } catch {
+            guard !Task.isCancelled, !gameStarted else { return }
+            if quietly {
+                NSLog("[launcher] Background Steam check deferred: %@", Self.friendly(error))
+                return
+            }
             phase = .signIn
             signInError = Self.friendly(error)
         }
     }
 
     func signOut() {
+        startupTask?.cancel()
+        signInTask?.cancel()
+        passwordSession = nil
+        playTask?.cancel()
+        saveSync?.cancel()
+        previousSaveSync = saveSync ?? previousSaveSync
+        saveSync = nil
+        // Any late network response retains the old, permanently closed gate.
+        let oldAccess = saveWriteAccess
+        let previousClosure = saveWriteClosure
+        saveWriteAccess = CloudSyncWriteAccess()
+        saveWriteClosure = Task.detached {
+            await previousClosure?.value
+            oldAccess.close()
+        }
+        gameStarted = false
+        saves = nil
         installTask?.cancel()
         spaceRefreshTask?.cancel()
         let handoff = backgroundHandoffTask
@@ -244,25 +283,35 @@ final class LauncherModel: ObservableObject {
 
     // MARK: Install
 
-    func refreshInstall() async {
+    func refreshInstall(quietly: Bool = false) async {
+        guard !Task.isCancelled, !gameStarted else { return }
         spaceRefreshTask?.cancel()
-        install = .preparing
-        freeSpace = launcher.freeSpace
+        if !quietly {
+            install = .preparing
+            freeSpace = launcher.freeSpace
+        }
         do {
             let p = try await launcher.plan()
+            guard !Task.isCancelled, !gameStarted else { return }
             plan = p
-            buildID = p.buildID
             downloadBytes = p.totalBytes
-            await refreshInstallSpace(for: p)
-            install = launcher.installed == nil ? .notInstalled : .installed(updateAvailable: launcher.needsUpdate(p))
+            if !quietly { await refreshInstallSpace(for: p) }
+            guard !Task.isCancelled, !gameStarted else { return }
+            if let local = launcher.playableInstallation {
+                buildID = local.buildID
+                install = .installed(updateAvailable: launcher.needsUpdate(p))
+            } else {
+                buildID = p.buildID
+                install = .notInstalled
+            }
             // A download that was running when the app last went away picks up on its own.
-            if wasDownloading, case .installed(updateAvailable: false) = install {
-                wasDownloading = false
-            } else if wasDownloading {
+            if wasDownloading {
                 if isActive { startInstall() } else { resumeWhenActive = true }
             }
         } catch {
-            install = .failed(Self.friendly(error))
+            guard !Task.isCancelled, !gameStarted else { return }
+            if !quietly { install = .failed(Self.friendly(error)) }
+            else { NSLog("[launcher] Background install check deferred: %@", Self.friendly(error)) }
         }
     }
 
@@ -288,7 +337,7 @@ final class LauncherModel: ObservableObject {
     }
 
     func startInstall() {
-        guard !checkingInstallSpace else { return }
+        guard !checkingInstallSpace, !gameStarted, !launching, !requestingTrackingPermission else { return }
         guard let plan else {
             // A failed first manifest request leaves no plan. Try Again must plan again.
             guard install != .preparing else { return }
@@ -324,6 +373,7 @@ final class LauncherModel: ObservableObject {
                 try await runInstall(plan)
                 Self.keepOutOfBackup()
                 wasDownloading = false
+                buildID = plan.buildID
                 install = .installed(updateAvailable: false)
                 syncSavesInBackground()
             } catch is CancellationError {
@@ -449,28 +499,37 @@ final class LauncherModel: ObservableObject {
     /// headset save went up and nothing else in the cloud changed.
     static var cloudUploads = true
 
-    /// Syncs saves the way Steam does: nobody has to think about it. A failed sync (e.g. offline) is
-    /// retried at Play and at the next launch; nothing is lost because local saves are only replaced after a backup.
+    /// One background sync per launcher session. Failed checks retry on the next launch; Play
+    /// uses the saves already here and never starts another network round trip.
     func syncSavesInBackground() {
-        guard saveSync == nil else { return }
-        savesInPlace = false
-        savesMovedAt = Date()
+        guard saveSync == nil, !gameStarted else { return }
         saves = .syncing(CloudSync.Progress(stage: .checking))
+        let access = saveWriteAccess
+        let previous = previousSaveSync
+        let closure = saveWriteClosure
         saveSync = Task {
-            let ok = await syncSaves()
-            savesInPlace = false
+            // A signed-out sync may still be finishing an upload/history commit. A new
+            // account's sync must not race its filesystem work or its history snapshot.
+            await previous?.value
+            await closure?.value
+            guard !Task.isCancelled, !gameStarted else { return }
+            let ok = await syncSaves(writeAccess: access)
+            guard !Task.isCancelled, !gameStarted else { return }
             withAnimation(.spring(duration: 0.5)) { saves = ok ? .synced : .failed }
             saveSync = nil
         }
     }
 
-    private func syncSaves() async -> Bool {
+    private func syncSaves(writeAccess: CloudSyncWriteAccess) async -> Bool {
         let t0 = Date()
         let progress: @Sendable (CloudSync.Progress) async -> Void = { [weak self] p in
-            await MainActor.run { self?.savesProgressed(p, since: t0) }
+            await MainActor.run {
+                guard self?.saveWriteAccess === writeAccess else { return }
+                self?.savesProgressed(p, since: t0)
+            }
         }
         do {
-            let r = try await launcher.syncSaves(uploads: Self.cloudUploads, progress: progress)
+            let r = try await launcher.syncSaves(uploads: Self.cloudUploads, progress: progress, writeAccess: writeAccess)
             NSLog("%@", "[launcher] cloud sync (uploads \(Self.cloudUploads ? "on" : "off")) in \(Self.seconds(since: t0)): "
                   + "downloaded \(r.downloaded.count), uploaded \(r.uploaded.count), unchanged \(r.unchanged), "
                   + "backed up \(r.backedUp), relocated \(r.relocated), would upload \(r.wouldUpload)")
@@ -482,25 +541,18 @@ final class LauncherModel: ObservableObject {
     }
 
     private func savesProgressed(_ p: CloudSync.Progress, since t0: Date) {
-        guard case .syncing(let was) = saves else { return }
+        guard !gameStarted, case .syncing(let was) = saves else { return }
         if p.stage != was.stage {
             NSLog("%@", "[launcher] cloud sync: \(p.stage) \(p.total) files at \(Self.seconds(since: t0))")
         }
-        if p.savesInPlace { savesInPlace = true }
-        savesMovedAt = Date()
         saves = .syncing(p)
     }
 
-    /// Play waits for saves as long as they keep coming. When nothing has moved for this long (Steam stopped
-    /// answering), the game starts with the saves it has, and the sync finishes at the next launch.
-    static let playStall: TimeInterval = 10
-    /// The most Play waits for the quick look at the cloud after a sync (it usually takes well under a second).
-    static let quickCheckWait: TimeInterval = 4
-
-    /// Play: the selected tracking permission first (the system asks here, not as the game starts), then the latest
-    /// saves, then the game.
+    /// Play is the only transition to the game. Stop local cloud mutations before handing over;
+    /// a stalled network response can finish later, but its closed gate cannot replace a save.
     func play(_ start: @escaping () -> Void) {
-        guard playTask == nil, !launching, preparing == nil, controllerIssue == nil else { return }
+        guard case .installed = install, playTask == nil, !gameStarted,
+              !launching, preparing == nil, controllerIssue == nil else { return }
         let selectedMode = inputMode
         requestingTrackingPermission = true
         playTask = Task {
@@ -508,67 +560,29 @@ final class LauncherModel: ObservableObject {
                 requestingTrackingPermission = false
                 playTask = nil
             }
-            guard await allowControllerTracking(), inputMode == selectedMode, controllerIssue == nil else { return }
+            guard await allowControllerTracking(), !Task.isCancelled, phase == .library,
+                  inputMode == selectedMode, controllerIssue == nil else { return }
+            guard DemoState.current != nil || launcher.playableInstallation != nil else {
+                install = .notInstalled
+                return
+            }
             requestingTrackingPermission = false
             launching = true
-            let t0 = Date()
-            await latestSaves()
-            NSLog("%@", "[launcher] Play: saves ready in \(Self.seconds(since: t0))")
+            gameStarted = true
+            startupTask?.cancel()
+            spaceRefreshTask?.cancel()
+            let access = saveWriteAccess
+            await saveWriteClosure?.value
+            // A pending synchronous backup/rename must finish, but never hold up UI drawing.
+            await Task.detached(priority: .userInitiated) { access.close() }.value
             launching = false
+            guard !Task.isCancelled else { return }
             start()
-        }
-    }
-
-    /// Every save from the cloud in place before the game starts, usually with no wait: the sync that started with
-    /// the launcher brought them, and one quick look at the cloud catches a save made elsewhere since. A full sync
-    /// runs only when that look finds one, or when the launcher's sync didn't get through. Play waits for a sync's
-    /// downloads, not its uploads: those carry on while the game starts.
-    private func latestSaves() async {
-        let pressed = Date()
-        // The launcher left open while the headset slept loses its Steam connection: sign back in first (the saved
-        // sign-in, a second or two), or the look at the cloud below can't see what another device saved meanwhile.
-        if saveSync == nil, !(await launcher.cm.isLoggedOn), let creds = Keychain.load() {
-            let launcher = self.launcher
-            let back = await answer(within: Self.playStall) { try await launcher.logOn(creds) }
-            NSLog("%@", "[launcher] Play: Steam connection was lost; signed back in: \(back != nil) after \(Self.seconds(since: pressed))")
-        }
-        if saveSync == nil, saves == .synced {
-            saves = .syncing(CloudSync.Progress(stage: .checking))
-            let launcher = self.launcher
-            let changed = await answer(within: Self.quickCheckWait) { try await launcher.cloudChangedSinceLastSync() }
-            NSLog("[launcher] Play: Steam Cloud %@", changed == nil ? "didn't answer in time; the saves synced at launch stay"
-                                                    : changed! ? "has newer saves" : "has nothing newer")
-            guard changed == true else { saves = .synced; return }
-        }
-        syncSavesInBackground()
-        while !savesInPlace, saveSync != nil, Date().timeIntervalSince(max(pressed, savesMovedAt)) < Self.playStall {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        if !savesInPlace, let running = saveSync {
-            // Stops before the next file: a save is never half-written, and the rest come at the next launch.
-            NSLog("[launcher] Play: saves stalled for %.0f s; the game starts with the saves here", Self.playStall)
-            running.cancel()
-            await running.value
         }
     }
 
     /// "1.2 s", for the log.
     private static func seconds(since t0: Date) -> String { String(format: "%.1f s", Date().timeIntervalSince(t0)) }
-
-    /// `work`'s answer, or nil when it fails or hasn't answered within `seconds`. Then it's cancelled, and this
-    /// returns at once even if `work` is slow to stop (a Steam logon waits out its own timeout).
-    private func answer<T: Sendable>(within seconds: TimeInterval,
-                                     _ work: @escaping @Sendable () async throws -> T) async -> T? {
-        await withCheckedContinuation { (c: CheckedContinuation<T?, Never>) in
-            let once = FirstAnswer(c)
-            let task = Task.detached { once.give(try? await work()) }
-            Task.detached {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
-                task.cancel()
-                once.give(nil)
-            }
-        }
-    }
 
     // MARK: Helpers
 
@@ -583,20 +597,6 @@ final class LauncherModel: ObservableObject {
             }
         }
         return error.localizedDescription
-    }
-}
-
-/// Hands on the first answer it's given; later ones are dropped.
-private final class FirstAnswer<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var c: CheckedContinuation<T?, Never>?
-    init(_ c: CheckedContinuation<T?, Never>) { self.c = c }
-    func give(_ value: T?) {
-        lock.lock()
-        let c = self.c
-        self.c = nil
-        lock.unlock()
-        c?.resume(returning: value)
     }
 }
 

@@ -896,12 +896,97 @@ static void test_fades() {
     klvr_null.fixed_now = 0;
 }
 
+static void test_anatomical_references() {
+    auto *in = iface<vr::IVRInput>(vr::IVRInput_Version);
+    vr::VRActionHandle_t skeleton[2], pose;
+    in->GetActionHandle("/actions/default/in/SkeletonLeft", &skeleton[0]);
+    in->GetActionHandle("/actions/default/in/SkeletonRight", &skeleton[1]);
+    in->GetActionHandle("/actions/default/in/HandPose", &pose);
+    const auto saved = klvr_null;
+    connect_controllers();
+    klvr_null.fixed_now = 300;
+    using V = std::array<float, 3>;
+    auto sub = [](V a, V b) -> V { return {a[0]-b[0], a[1]-b[1], a[2]-b[2]}; };
+    auto dot = [](V a, V b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+    auto unit = [&](V v) -> V { float n = std::sqrt(dot(v, v)); return {v[0]/n, v[1]/n, v[2]/n}; };
+    auto cross = [](V a, V b) -> V { return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]}; };
+    auto position = [](const vr::VRBoneTransform_t &b) -> V { return {b.position.v[0], b.position.v[1], b.position.v[2]}; };
+    auto rotate = [](vr::HmdQuaternionf_t q, V v) -> V {
+        float tx=2*(q.y*v[2]-q.z*v[1]), ty=2*(q.z*v[0]-q.x*v[2]), tz=2*(q.x*v[1]-q.y*v[0]);
+        return {v[0]+q.w*tx+q.y*tz-q.z*ty, v[1]+q.w*ty+q.z*tx-q.x*tz, v[2]+q.w*tz+q.x*ty-q.y*tx};
+    };
+    for (int h = 0; h < 2; h++) {
+        // Save the controller outputs through the public API, then calculate
+        // the expected anatomical coordinates by projecting onto palm axes.
+        klvr_null.hand_tracking_enabled = 0;
+        vr::VRBoneTransform_t original[4][31], original_model[4][31];
+        for (int k = 0; k < 4; k++) {
+            const auto which = vr::EVRSkeletalReferencePose(k);
+            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent, which, original[k], 31) == vr::VRInputError_None);
+            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Model, which, original_model[k], 31) == vr::VRInputError_None);
+        }
+        const auto &open = original_model[vr::VRSkeletalReferencePose_OpenHand];
+        V z = unit(sub(position(open[1]), position(open[12])));
+        V across = sub(position(open[h ? 22 : 7]), position(open[h ? 7 : 22]));
+        V y = unit(cross(z, across)), x = unit(cross(y, z));
+        V basis[3] = {x, y, z}, palm;
+        for (int i = 0; i < 3; i++) palm[i] = (open[11].position.v[i] + open[12].position.v[i]) * 0.5f;
+
+        klvr_null.hand_tracking_enabled = 1;
+        auto &tracked = klvr_null.skeleton[h];
+        tracked.valid = 1; tracked.time = 300;
+        for (int b = 0; b < 31; b++) {
+            float *v = tracked.bones + 7*b;
+            v[0] = 0.001f*b; v[1] = 0.002f*b; v[2] = -0.003f*b;
+            v[3] = 0; v[4] = 0; v[5] = 0; v[6] = 1;
+        }
+        tracked.bones[7*7+3] = 0.6f; tracked.bones[7*7+6] = 0.8f;
+        vr::VRBoneTransform_t live_before[31], live_after[31];
+        vr::InputPoseActionData_t pose_before{}, pose_after{};
+        const auto origin = vr::VRInputValueHandle_t(h + 1);
+        CHECK(in->GetSkeletalBoneData(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live_before, 31) == vr::VRInputError_None);
+        CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pose_before, sizeof pose_before, origin) == vr::VRInputError_None);
+        for (int k = 0; k < 4; k++) {
+            vr::VRBoneTransform_t local[31], model[31];
+            const auto which = vr::EVRSkeletalReferencePose(k);
+            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent, which, local, 31) == vr::VRInputError_None);
+            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Model, which, model, 31) == vr::VRInputError_None);
+            NEAR(local[0].orientation.w, 1); NEAR(local[0].orientation.x, 0); NEAR(local[0].orientation.y, 0); NEAR(local[0].orientation.z, 0);
+            for (int i = 0; i < 3; i++) NEAR(local[0].position.v[i], 0);
+            // Only root children (wrist and auxiliary bones) may change.
+            for (int b = 2; b <= 25; b++) CHECK(memcmp(&local[b], &original[k][b], sizeof local[b]) == 0);
+            for (int b = 1; b < 31; b++) {
+                V relative = sub(position(original_model[k][b]), palm);
+                for (int i = 0; i < 3; i++) NEAR(model[b].position.v[i], dot(basis[i], relative));
+                for (int axis = 0; axis < 3; axis++) {
+                    V unit_axis = {}; unit_axis[axis] = 1;
+                    V old_axis = rotate(original_model[k][b].orientation, unit_axis);
+                    V new_axis = rotate(model[b].orientation, unit_axis);
+                    for (int i = 0; i < 3; i++) NEAR(new_axis[i], dot(basis[i], old_axis));
+                }
+            }
+        }
+        CHECK(in->GetSkeletalBoneData(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live_after, 31) == vr::VRInputError_None);
+        CHECK(memcmp(live_before, live_after, sizeof live_before) == 0);
+        CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pose_after, sizeof pose_after, origin) == vr::VRInputError_None);
+        CHECK(memcmp(&pose_before.pose.mDeviceToAbsoluteTracking, &pose_after.pose.mDeviceToAbsoluteTracking, sizeof pose_before.pose.mDeviceToAbsoluteTracking) == 0);
+        klvr_null.hand_tracking_enabled = 0;
+        for (int k = 0; k < 4; k++) {
+            vr::VRBoneTransform_t controller[31];
+            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::EVRSkeletalReferencePose(k), controller, 31) == vr::VRInputError_None);
+            CHECK(memcmp(controller, original[k], sizeof controller) == 0);
+        }
+    }
+    klvr_null = saved;
+}
+
 int main() {
     test_loader();
     test_system();
     test_abi_thunk();
     test_compositor();
     test_input();
+    test_anatomical_references();
     test_stubs();
     test_private();
     test_overlay();

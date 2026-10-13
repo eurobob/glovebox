@@ -101,15 +101,7 @@ struct LibraryView: View {
         }
     }
 
-    /// Which status is showing: the button's stage, and while it reads Play, where the saves are (not every file).
-    private var statusStage: String {
-        guard stage == "play" || stage == "launching" else { return stage }
-        switch model.saves {
-        case .syncing: return stage + "-saves"
-        case .failed: return stage + "-offline"
-        default: return stage
-        }
-    }
+    private var statusStage: String { stage }
 
     private var journeyStep: Int {
         if case .installed = model.install { return 2 }
@@ -150,8 +142,7 @@ struct LibraryView: View {
         case .notInstalled: return "install"
         case .downloading: return "downloading"
         case .paused: return "paused"
-        case .installed(true): return "update"
-        case .installed(false):
+        case .installed:
             if model.preparing != nil { return "preparing" }
             if model.requestingTrackingPermission { return "permission" }
             if model.launching { return "launching" }
@@ -189,23 +180,18 @@ struct LibraryView: View {
         case .paused:
             Button { model.startInstall() } label: { actionLabel("Resume", "arrow.down") }
                 .bigButton()
-        case .installed(let update):
-            if update {
-                Button { model.startInstall() } label: { actionLabel("Update", "arrow.down") }
-                    .bigButton()
-            } else {
-                // The white pill, a soft glow and the boldest type on the page: the moment it's all for.
-                // Play waits for the selected input mode to be ready.
-                let busy = model.requestingTrackingPermission || model.launching || model.preparing != nil
-                let ready = model.controllerIssue == nil
-                Button { model.play(onPlay) } label: {
-                    if busy { spinner }
-                    else { actionLabel("Play", "play.fill", weight: .bold) }
-                }
-                .bigButton()
-                .disabled(!ready || busy)
-                .shadow(color: .white.opacity(ready && !busy ? 0.35 : 0), radius: 22)
+        case .installed:
+            // The white pill, a soft glow and the boldest type on the page: the moment it's all for.
+            // Play waits for the selected input mode to be ready.
+            let busy = model.requestingTrackingPermission || model.launching || model.preparing != nil
+            let ready = model.controllerIssue == nil
+            Button { model.play(onPlay) } label: {
+                if busy { spinner }
+                else { actionLabel("Play", "play.fill", weight: .bold) }
             }
+            .bigButton()
+            .disabled(!ready || busy)
+            .shadow(color: .white.opacity(ready && !busy ? 0.35 : 0), radius: 22)
         }
     }
 
@@ -250,41 +236,19 @@ struct LibraryView: View {
         case .paused(let p):
             if model.hasRoomForInstall { DownloadStatus(progress: p, paused: true) }
             else { storageNeeded }
-        case .installed(updateAvailable: false):
+        case .installed:
             if let preparing = model.preparing {
                 PreparingStatus(preparing: preparing)
             } else if model.requestingTrackingPermission {
                 Label("Allow tracking to continue", systemImage: "hand.raised")
                     .font(.title3).foregroundStyle(.secondary)
             } else if model.launching {
-                if case .syncing(let p) = model.saves {
-                    SavesStatus(progress: p, launching: true)
-                } else {
-                    SavesStatus(progress: CloudSync.Progress(stage: .checking), launching: true)
-                }
+                Text("Starting…").font(.title3).foregroundStyle(.secondary)
             } else if let issue = model.controllerIssue {
                 ControllerStatus(issue: issue, connected: model.controllers.connected)
             } else {
-                switch model.saves {
-                case .syncing(let p):
-                    SavesStatus(progress: p, launching: false)
-                case .failed:
-                    // Play tries again before the game starts.
-                    Label("Couldn't reach Steam Cloud", systemImage: "exclamationmark.icloud")
-                        .font(.title3).foregroundStyle(.secondary)
-                case .synced:
-                    // With LauncherModel.cloudUploads off, saves only come from Steam.
-                    Label(LauncherModel.cloudUploads ? "Saves in sync with Steam" : "Saves from Steam",
-                          systemImage: LauncherModel.cloudUploads ? "checkmark.icloud" : "icloud.and.arrow.down")
-                        .font(.title3).foregroundStyle(.secondary)
-                case nil:
-                    EmptyView()
-                }
+                EmptyView()
             }
-        case .installed(updateAvailable: true):
-            if model.hasRoomForInstall {
-                Text("A new version is ready").font(.title3).foregroundStyle(.secondary)
-            } else { storageNeeded }
         case .failed(let msg):
             if model.hasRoomForInstall {
                 Label(msg, systemImage: "exclamationmark.circle.fill").font(.title3).foregroundStyle(.orange)
@@ -307,11 +271,16 @@ struct LibraryView: View {
     private var accountMenu: some View {
         Menu {
             Button("Controls") { showControls = true }
+            if case .installed(updateAvailable: true) = model.install {
+                Button("Update game") { model.startInstall() }
+                    .disabled(model.launching || model.requestingTrackingPermission || model.preparing != nil)
+            }
             Toggle("Help Improve Glovebox", isOn: Binding(get: { model.shareStutters ?? false },
                                                           set: { model.setShareStutters($0) }))
             Button("Share Diagnostics") { showDiagnostics = true }
             Button("Licenses") { showLicenses = true }
             Button("Sign out", role: .destructive) { model.signOut() }
+                .disabled(model.launching || model.requestingTrackingPermission || model.preparing != nil)
         } label: {
             Label(model.accountName, systemImage: "person.crop.circle.fill")
                 .font(.callout.weight(.medium))
@@ -429,6 +398,9 @@ private struct PreparingStatus: View {
     let preparing: LauncherModel.Preparing
 
     var body: some View {
+        if preparing.title == "Starting" || preparing.title == "Loading" {
+            Text("Starting…").font(.title3).foregroundStyle(.secondary)
+        } else {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(preparing.title).font(.title3.weight(.semibold))
@@ -444,6 +416,7 @@ private struct PreparingStatus: View {
                 .foregroundStyle(.secondary)
         }
         .frame(width: 420)
+        }
     }
 
     /// Time left when the game can tell, else how far along.

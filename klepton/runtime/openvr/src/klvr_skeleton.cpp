@@ -11,6 +11,7 @@
 // SteamVR itself makes for Oculus Touch ("partial" skeletal tracking).
 #include "klvr_internal.h"
 #include "klvr_skeleton.h"
+#include <array>
 #include <cmath>
 
 namespace klvr {
@@ -87,6 +88,44 @@ void skel_reference(int hand, vr::EVRSkeletalReferencePose which, vr::VRBoneTran
                         : which == vr::VRSkeletalReferencePose_OpenHand ? kRefOpen[hand]
                         : kRefBind[hand];
     for (int i = 0; i < kBoneCount; i++) out[i] = bone(t[i]);
+}
+
+void skel_reference_anatomical(int hand, vr::EVRSkeletalReferencePose which,
+                               vr::VRBoneTransform_t out[kBoneCount]) {
+    // Use one frame from the canonical open-hand geometry for every reference
+    // variant. Deriving it separately from a fist would erase articulation.
+    // This matches KleptonTrackedHand's palm construction without changing
+    // its already-usable raw/aim pose or any measured live joint transform.
+    static const std::array<Pose, 2> anatomical_from_reference = [] {
+        auto cross = [](Vec3 a, Vec3 b) -> Vec3 {
+            return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+        };
+        auto unit = [](Vec3 v) { return vscale(v, 1.0f / std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z)); };
+        std::array<Pose, 2> result;
+        for (int h = 0; h < 2; h++) {
+            vr::VRBoneTransform_t local[kBoneCount], model[kBoneCount];
+            skel_reference(h, vr::VRSkeletalReferencePose_OpenHand, local);
+            skel_to_model(local, model);
+            Vec3 z = vscale(unit(vsub(p_of(model[12]), p_of(model[1]))), -1);
+            Vec3 across = vscale(vsub(p_of(model[7]), p_of(model[22])), h ? -1 : 1);
+            Vec3 y = unit(cross(z, across)), x = unit(cross(y, z));
+            Vec3 p = vscale(vadd(p_of(model[11]), p_of(model[12])), 0.5f);
+            vr::HmdMatrix34_t palm = {{{x.x, y.x, z.x, p.x},
+                                      {x.y, y.y, z.y, p.y},
+                                      {x.z, y.z, z.z, p.z}}};
+            result[h] = pinv(from_mat34(palm));
+        }
+        return result;
+    }();
+    hand = hand ? 1 : 0;
+    skel_reference(hand, which, out);
+    // Root is still identity. Only its direct children change coordinates;
+    // all wrist/finger-relative articulation remains Valve's original data.
+    for (int i = 1; i < kBoneCount; i++) {
+        if (kParent[i] != 0) continue;
+        Pose p = pmul(anatomical_from_reference[hand], {p_of(out[i]), q_of(out[i])});
+        out[i] = make(p.p, p.q);
+    }
 }
 
 void skel_pose(int hand, const float curl[5], vr::EVRSkeletalMotionRange range, vr::VRBoneTransform_t out[kBoneCount]) {

@@ -22,15 +22,18 @@ public struct GameProfile: Sendable {
     /// Depots fetched at an exact, tested build instead of Steam's current one, so a game update
     /// can't break the port. Depots not listed follow the current public build.
     public var pinnedManifests: [UInt32: UInt64]
+    /// Small essential files checked before trusting a completed install without a network request.
+    public let requiredFiles: [String]
 
     public init(appID: UInt32, title: String, depots: [UInt32], localPath: @escaping @Sendable (String) -> String?,
                 policy: @escaping @Sendable (DepotManifest.File) -> FilePolicy, cloudRoots: [String: String],
                 cloudNeverUpload: [String] = [], storeURL: URL, heroImageURL: URL, logoURL: URL,
-                screenshotURLs: [URL] = [], pinnedManifests: [UInt32: UInt64] = [:]) {
+                screenshotURLs: [URL] = [], pinnedManifests: [UInt32: UInt64] = [:], requiredFiles: [String] = []) {
         self.appID = appID; self.title = title; self.depots = depots; self.localPath = localPath; self.policy = policy
         self.cloudRoots = cloudRoots; self.cloudNeverUpload = cloudNeverUpload
         self.storeURL = storeURL; self.heroImageURL = heroImageURL; self.logoURL = logoURL
         self.screenshotURLs = screenshotURLs; self.pinnedManifests = pinnedManifests
+        self.requiredFiles = requiredFiles
     }
 
 }
@@ -78,6 +81,7 @@ public extension GameProfile {
         ].map { URL(string: "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/ss_\($0).1920x1080.jpg")! },
         // The build we tested (Steam build 25487405), the same as packages/alyx/package.json "steam.manifests"
         // (GameProfileTests checks they agree)
-        pinnedManifests: [546_561: 1_436_897_171_613_240_821, 546_564: 9_198_205_754_520_568_813]
+        pinnedManifests: [546_561: 1_436_897_171_613_240_821, 546_564: 9_198_205_754_520_568_813],
+        requiredFiles: ["hlvr/gameinfo.gi", "hlvr/pak01_dir.vpk", "core/pak01_dir.vpk"]
     )
 }

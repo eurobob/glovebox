@@ -7,13 +7,27 @@ Build 1012.24.1 added skeletal-action pose queries, but its headset playtest sti
 misalignment. Build 1013.1.1 keeps native tracking capability at Full before the first sample and during
 dropouts; temporary availability still uses bActive/NoData. It also records at most 36 native query lines
 per process, covering the actual placement poses and reference/live wrist transforms Alyx requests.
-This corrects a capability bug; whether it resolves the visible alignment still needs a headset playtest.
+That capability fix did not resolve the visible alignment. Its trace confirmed that Alyx reads raw hand-pose
+actions and OpenHand reference transforms alongside live finger bones. With real palms down, the rendered
+palms still faced inward. Build **1013.2.2** tests reference transforms expressed in the same anatomical palm
+frame as the native live skeleton, preserving the existing raw aiming pose and live finger data. This is a
+targeted compatibility experiment; its visual alignment still needs a headset playtest.
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.
 
 Hands mode asks for ARKit hand-tracking permission at Play. If access is denied, use the launcher's
 **Open Settings** button to enable it. Unsupported hand tracking blocks Play in Hands mode.
+
+## Returning to the game
+
+The app still opens to the launcher. A completed local installation and saved account make Play available
+immediately; account, ownership and update checks run in the background. Play uses local saves without a new
+network round trip. A pending cloud download cannot replace local saves after game startup begins.
+
+The redundant graphics warm-up before Play is removed. The game's own initialization reuses its persistent
+graphics cache after Play; a spinner covers normal startup, with progress shown if a cold graphics cache
+takes longer to prepare. The immersive space opens only after Play and runtime initialization.
 
 ## Gestures
 

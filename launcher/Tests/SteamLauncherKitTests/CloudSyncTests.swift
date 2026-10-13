@@ -6,9 +6,12 @@ final class FakeCloud: CloudRemote {
     var files: [String: (data: Data, time: Date)] = [:]
     var failUploads = false
     var uploads = 0
+    var beforeList: (() throws -> Void)?
+    var beforeUpload: (() throws -> Void)?
 
     func list() async throws -> [CloudFile] {
-        files.map { name, v in
+        try beforeList?()
+        return files.map { name, v in
             var f = CloudFile()
             f.filename = name
             f.timestamp = UInt64(v.time.timeIntervalSince1970)
@@ -27,6 +30,7 @@ final class FakeCloud: CloudRemote {
     }
     func upload(_ batch: [(name: String, data: Data, time: Date)]) async throws {
         if failUploads { throw SteamError.badData("network down") }
+        try beforeUpload?()
         uploads += 1
         for f in batch { files[f.name] = (f.data, f.time) }
     }
@@ -97,6 +101,104 @@ final class CloudSyncTests: XCTestCase {
         let r = try await sync()
         XCTAssertEqual(readLocal("quick.sav"), "pc")
         XCTAssertEqual(r.downloaded, [name("quick.sav")])
+    }
+
+    func testClosingGateDuringListingPreventsSlotRelocation() async throws {
+        cloud.files[name("s0/quick.sav")] = (Data("cloud slot".utf8), t0)
+        try writeLocal("s0/quick.sav", "headset slot", t0)
+        let access = CloudSyncWriteAccess()
+        cloud.beforeList = { access.close() }
+        do {
+            _ = try await makeSync().run(writeAccess: access)
+            XCTFail("A late listing must not prepare or relocate saves after Play")
+        } catch is CancellationError {}
+        XCTAssertEqual(readLocal("s0/quick.sav"), "headset slot")
+        XCTAssertNil(readLocal("s1/quick.sav"))
+        XCTAssertTrue(backups().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".state.json").path))
+    }
+
+    func testClosingGateDuringDownloadProtectsTheRunningGamesSave() async throws {
+        cloud.files[name("quick.sav")] = (Data("original".utf8), t0)
+        _ = try await sync()
+        cloud.files[name("quick.sav")] = (Data("new cloud".utf8), t0)
+        let access = CloudSyncWriteAccess()
+        cloud.beforeDownload = { _ in
+            access.close()
+            try! self.writeLocal("quick.sav", "active game", self.t0)
+        }
+        do {
+            _ = try await makeSync().run(writeAccess: access)
+            XCTFail("An in-flight download must not replace an active game's save")
+        } catch is CancellationError {}
+        XCTAssertEqual(readLocal("quick.sav"), "active game")
+        XCTAssertTrue(backups().isEmpty)
+    }
+
+    func testUploadCompletingAfterPlayKeepsHistoryForTheNextLocalSave() async throws {
+        cloud.files[name("quick.sav")] = (Data("original".utf8), t0)
+        _ = try await sync()
+        try writeLocal("quick.sav", "previous game", t0)
+        let access = CloudSyncWriteAccess()
+        cloud.beforeUpload = {
+            access.close()
+            // Play has started while Steam is accepting the immutable previous-session bytes.
+            try self.writeLocal("quick.sav", "active game", self.t0)
+        }
+        let first = try await makeSync().run(writeAccess: access)
+        XCTAssertEqual(first.uploaded, [name("quick.sav")])
+        XCTAssertEqual(cloud.files[name("quick.sav")]?.data, Data("previous game".utf8))
+        XCTAssertEqual(readLocal("quick.sav"), "active game")
+
+        cloud.beforeUpload = nil
+        let next = try await sync()
+        XCTAssertEqual(next.uploaded, [name("quick.sav")])
+        XCTAssertTrue(next.downloaded.isEmpty, "A committed upload must not look like a cloud conflict next session")
+        XCTAssertTrue(next.relocated.isEmpty)
+        XCTAssertEqual(readLocal("quick.sav"), "active game")
+        XCTAssertEqual(cloud.files[name("quick.sav")]?.data, Data("active game".utf8))
+        XCTAssertTrue(backups("headset").isEmpty)
+    }
+
+    func testCancellationDuringCloudBackupDoesNotBeginAnUpload() async throws {
+        cloud.files[name("quick.sav")] = (Data("original".utf8), t0)
+        _ = try await sync()
+        try writeLocal("quick.sav", "headset", t0)
+        cloud.beforeDownload = { _ in withUnsafeCurrentTask { $0?.cancel() } }
+        let task = Task { try await self.sync() }
+        do {
+            _ = try await task.value
+            XCTFail("Signing out during the cloud backup must prevent a fresh upload")
+        } catch is CancellationError {}
+        XCTAssertEqual(cloud.uploads, 0)
+        XCTAssertEqual(cloud.files[name("quick.sav")]?.data, Data("original".utf8))
+        XCTAssertEqual(readLocal("quick.sav"), "headset")
+    }
+
+    func testClosingGateDrainsAnInProgressMutationAndRejectsLaterOnes() throws {
+        let access = CloudSyncWriteAccess()
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let closing = DispatchSemaphore(value: 0)
+        let closed = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            try! access.perform {
+                entered.signal()
+                _ = release.wait(timeout: .now() + 5)
+            }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        DispatchQueue.global().async {
+            closing.signal()
+            access.close()
+            closed.signal()
+        }
+        XCTAssertEqual(closing.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(closed.wait(timeout: .now() + 0.05), .timedOut,
+                       "Play must not proceed while an admitted file mutation is still running")
+        release.signal()
+        XCTAssertEqual(closed.wait(timeout: .now() + 2), .success)
+        XCTAssertThrowsError(try access.perform { XCTFail("Closed gates must reject later mutations") })
     }
 
     func testNewHeadsetSaveGoesUp() async throws {

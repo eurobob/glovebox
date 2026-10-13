@@ -20,6 +20,7 @@ public final class SteamLauncher: @unchecked Sendable {
     public func connect(avoiding: Set<String> = []) async throws {
         var lastError: Error = SteamError.noServers
         for attempt in 0..<3 {
+            try Task.checkCancellation()
             do {
                 await cm.disconnect()
                 cm = CMClient()
@@ -56,6 +57,7 @@ public final class SteamLauncher: @unchecked Sendable {
             try await self.cm.logon(accountName: creds.accountName, refreshToken: creds.refreshToken,
                                     machineName: SteamAuth.deviceName())
         }
+        try Task.checkCancellation()
         logon = info
         return info
     }
@@ -71,16 +73,18 @@ public final class SteamLauncher: @unchecked Sendable {
         var lastError: Error = SteamError.notConnected
         var turnedAway: Set<String> = []
         for attempt in 0..<4 {
+            try Task.checkCancellation()
             do {
                 if await cm.endpoint == nil { try await connect(avoiding: turnedAway) }
                 return try await body()
             } catch SteamError.result(let r, let what) where r != .tryAnotherCM && r != .serviceUnavailable {
                 throw SteamError.result(r, what)
             } catch {
+                try Task.checkCancellation()
                 lastError = error
                 if let e = await cm.endpoint { turnedAway.insert(e) }
                 log("logon attempt \(attempt + 1) failed: \(error)")
-                try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 500_000_000)
+                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 500_000_000)
                 try? await connect(avoiding: turnedAway)
             }
         }
@@ -125,6 +129,24 @@ public final class SteamLauncher: @unchecked Sendable {
 
     public var installed: InstalledState? {
         (try? Data(contentsOf: stateURL)).flatMap { try? JSONDecoder().decode(InstalledState.self, from: $0) }
+    }
+
+    private var installingMarker: URL { installRoot.appendingPathComponent(".launcher-installing") }
+
+    /// A local readiness check, not a full integrity scan. Only a successful install writes the
+    /// receipt. A paused update remains incomplete even when automatic resume has been turned off.
+    /// An older completed build is playable; discovering an update does not revoke it.
+    public var playableInstallation: InstalledState? {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: installRoot.appendingPathComponent(".launcher-downloading").path),
+              !fm.fileExists(atPath: installingMarker.path),
+              let state = installed, state.buildID > 0,
+              profile.depots.allSatisfy({ (state.manifests[String($0)] ?? 0) > 0 }) else { return nil }
+        for path in profile.requiredFiles {
+            guard let values = try? installRoot.appendingPathComponent(path).resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true, (values.fileSize ?? 0) > 0 else { return nil }
+        }
+        return state
     }
 
     /// Fetches the current build's manifests (or the pinned ones). Only owners get past the depot key and
@@ -209,6 +231,8 @@ public final class SteamLauncher: @unchecked Sendable {
     public func install(_ plan: InstallPlan, skipping: Set<String> = [],
                         progress: @escaping @Sendable (DownloadProgress) -> Void) async throws {
         try FileManager.default.createDirectory(at: installRoot, withIntermediateDirectories: true)
+        // This survives Pause and sign-out; neither makes partially replaced game files playable.
+        try Data().write(to: installingMarker, options: .atomic)
         let cdn = CDNClient(servers: plan.servers)
         let total = plan.totalBytes
         let staged = self.staged
@@ -235,6 +259,7 @@ public final class SteamLauncher: @unchecked Sendable {
                                    manifests: Dictionary(uniqueKeysWithValues: plan.depots.map { (String($0.depotID), $0.manifest.manifestID) }),
                                    date: Date())
         try JSONEncoder().encode(state).write(to: stateURL, options: .atomic)
+        try FileManager.default.removeItem(at: installingMarker)
     }
 
     public func needsUpdate(_ plan: InstallPlan) -> Bool {
@@ -284,9 +309,10 @@ public final class SteamLauncher: @unchecked Sendable {
     /// Call before the game starts and again after it exits (or at the next launch). With `uploads`
     /// off it only downloads, and the report lists what would have gone up.
     public func syncSaves(uploads: Bool,
-                          progress: @escaping @Sendable (CloudSync.Progress) async -> Void = { _ in }) async throws -> CloudSync.Report {
+                          progress: @escaping @Sendable (CloudSync.Progress) async -> Void = { _ in },
+                          writeAccess: CloudSyncWriteAccess? = nil) async throws -> CloudSync.Report {
         guard let sync = try await cloudSync(uploads: uploads) else { return CloudSync.Report() }
-        return try await sync.run(progress: progress)
+        return try await sync.run(progress: progress, writeAccess: writeAccess)
     }
 
     /// Whether Steam Cloud has a save the last sync didn't bring here (CloudSync.cloudChangedSinceLastSync): one

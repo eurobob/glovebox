@@ -44,7 +44,6 @@ struct AlyxLauncherScreens: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var playing = false
     @State private var bootFailed = false
-    @State private var prewarmStarted = false
 
     var body: some View {
         ZStack {
@@ -61,51 +60,12 @@ struct AlyxLauncherScreens: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in model.scenePhaseChanged(phase) }
         .task { StutterReports.start() }  // a stutter report, if the player said yes: one per launch
-        .onChange(of: model.install, initial: true) { _, state in prewarm(state) }
     }
 
-    /// "Preparing graphics" before Play, in the shared space: once the game is installed, the shader cache is warmed
-    /// with no game running (kl_app_prewarm, on a device made as the game makes its own) while this window shows the
-    /// progress and holds Play (LauncherModel.preparing), so the player can use other apps meanwhile. Play then finds
-    /// the cache warm: the game's own replay takes seconds and the immersive space opens on the map loading. When it
-    /// cannot run (no usable device settings), the game's own replay at Play is the fallback, in passthrough.
-    private func prewarm(_ state: LauncherModel.InstallState) {
-        guard !prewarmStarted, !playing, case .installed(updateAvailable: false) = state else { return }
-        prewarmStarted = true
-        model.preparing = LauncherModel.Preparing(fraction: 0, secondsLeft: nil, firstTimeOnly: false)
-        let resources = Paths.resources, docs = Paths.container
-        let run = Task.detached(priority: .userInitiated) { () -> Int32 in
-            let t0 = Date()
-            let rc = kl_app_prewarm(resources, docs)
-            NSLog("[launcher] Preparing graphics before Play: %@ in %.1f s",
-                  rc == 0 ? "done" : "not possible (\(rc)), the game's own replay is the fallback",
-                  Date().timeIntervalSince(t0))
-            return rc
-        }
-        Task { @MainActor in
-            let poll = Task { @MainActor in
-                var estimate = ReplayEstimate()
-                while !Task.isCancelled {
-                    var done: UInt32 = 0, total: UInt32 = 0, elapsed: Double = 0
-                    if kl_foz_progress(&done, &total, &elapsed) == 1, total > 0, var p = model.preparing {
-                        p.fraction = Double(done) / Double(total)
-                        p.secondsLeft = estimate.secondsLeft(done: done, total: total, elapsed: elapsed)
-                        p.firstTimeOnly = elapsed > 10
-                        model.preparing = p
-                    }
-                    try? await Task.sleep(nanoseconds: 300_000_000)
-                }
-            }
-            _ = await run.value
-            poll.cancel()
-            if !playing { model.preparing = nil }
-        }
-    }
-
-    /// LibraryView's Play button runs model.play(onPlay) itself: the latest saves first (usually a quick look at the
-    /// cloud; a stalled sync is cut off after 10 s), then this.
+    /// The game's own replay reuses the persistent Metal cache. Running a separate prewarm on every visit to the
+    /// launcher repeated that work and blocked Play. Required graphics initialization now runs only after Play.
     private func play() {
-        NSLog("[launcher] Play: saves synced, starting the game")
+        NSLog("[launcher] Play: starting the game with local saves")
         Lifecycle.gameStarted = true
         model.preparing = LauncherModel.Preparing(fraction: 0, secondsLeft: nil, firstTimeOnly: false, title: "Starting")
         playing = true
@@ -117,8 +77,6 @@ struct AlyxLauncherScreens: View {
     @MainActor private func followGame() async {
         var replayEnd: Date?
         var estimate = ReplayEstimate()
-        // after a prewarm the progress already reads done: the map loading starts after the game's own replay
-        var sawReplay = false
         while !Lifecycle.firstPicture {
             if Lifecycle.bootFailed { bootFailed = true; model.preparing = nil; return }
             var done: UInt32 = 0, total: UInt32 = 0, elapsed: Double = 0
@@ -127,12 +85,13 @@ struct AlyxLauncherScreens: View {
             if state == 1 && total > 0 {
                 // the replay: 90% of the bar; its time left from the rate so far, plus ~12 s of loading after it
                 let f = Double(done) / Double(total)
-                sawReplay = true
-                p.title = "Preparing graphics"
+                // A warm cache normally completes quickly. Keep ordinary launch feedback a spinner; only expose
+                // the real pipeline progress when a cold cache makes preparation take appreciable time.
+                p.title = elapsed > 10 ? "Preparing graphics" : "Starting"
                 p.fraction = 0.9 * f
                 p.secondsLeft = estimate.secondsLeft(done: done, total: total, elapsed: elapsed) + 12
-                p.firstTimeOnly = elapsed > 10
-            } else if state == 2 && (sawReplay || !prewarmStarted) {
+                p.firstTimeOnly = false
+            } else if state == 2 {
                 // the map: the last 10%, creeping, since the game reports no progress of its own
                 if replayEnd == nil { replayEnd = Date() }
                 let t = Date().timeIntervalSince(replayEnd!)
