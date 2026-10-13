@@ -3,8 +3,11 @@
 This fork adds hand controls to **upstream Glovebox 0.1.5**. **Experimental: headset playtests confirmed
 individual finger articulation in build 1012.23.1, but still showed a visible 90° hand rotation and a
 translation offset fixed relative to the room.** Earlier tests also exposed jitter and unreliable movement.
-Build 1012.24.1 supports OpenVR pose queries for skeletal actions so the game can request the skeleton's
-placement as well as its finger bones. The resulting visual alignment has not yet been confirmed on hardware.
+Build 1012.24.1 added skeletal-action pose queries, but its headset playtest still showed substantial
+misalignment. Build 1013.1.1 keeps native tracking capability at Full before the first sample and during
+dropouts; temporary availability still uses bActive/NoData. It also records at most 36 native query lines
+per process, covering the actual placement poses and reference/live wrist transforms Alyx requests.
+This corrects a capability bug; whether it resolves the visible alignment still needs a headset playtest.
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.

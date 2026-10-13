@@ -552,6 +552,17 @@ static void test_input() {
     klvr_null.fixed_now = 100;
     klvr_null.hand_tracking_enabled = 1;
     vr::EVRSkeletalTrackingLevel level;
+    // Capability does not depend on having a sample when the game first
+    // initializes its hand model. Availability remains separately inactive.
+    CHECK(in->GetSkeletalTrackingLevel(0, &level) == vr::VRInputError_InvalidHandle);
+    CHECK(in->GetSkeletalTrackingLevel(trig, &level) == vr::VRInputError_WrongType);
+    CHECK(in->GetSkeletalTrackingLevel(skl, nullptr) == vr::VRInputError_InvalidParam);
+    for (auto action : {skl, skr}) {
+        CHECK(in->GetSkeletalTrackingLevel(action, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
+        CHECK(in->GetSkeletalActionData(action, &sd, sizeof sd) == vr::VRInputError_None && !sd.bActive);
+        CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Parent,
+            vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_NoData);
+    }
     for (int h = 0; h < 2; h++) {
         auto &tracked = klvr_null.skeleton[h];
         tracked.valid = 1;
@@ -671,12 +682,13 @@ static void test_input() {
     CHECK(in->GetSkeletalActionData(skl, &sd, sizeof sd) == vr::VRInputError_None && !sd.bActive);
     CHECK(in->GetSkeletalActionData(skr, &sd, sizeof sd) == vr::VRInputError_None && sd.bActive);
     CHECK(in->GetSkeletalBoneData(skl, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_NoData);
-    CHECK(in->GetSkeletalTrackingLevel(skl, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Estimated);
+    CHECK(in->GetSkeletalTrackingLevel(skl, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
     klvr_null.fixed_now = 100.1;
     CHECK(in->GetSkeletalActionData(skr, &sd, sizeof sd) == vr::VRInputError_None && !sd.bActive);
     CHECK(in->GetSkeletalSummaryData(skr, vr::VRSummaryType_FromDevice, &sum) == vr::VRInputError_NoData);
     CHECK(in->GetSkeletalBoneDataCompressed(skr, vr::VRSkeletalMotionRange_WithController, packed, sizeof packed, &need) == vr::VRInputError_NoData);
-    CHECK(in->GetSkeletalTrackingLevel(skr, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Estimated);
+    CHECK(in->GetSkeletalTrackingLevel(skr, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
+    CHECK(in->GetSkeletalTrackingLevel(skl, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
     CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pd, sizeof pd, rh) == vr::VRInputError_None && !pd.bActive);
     // Switching back retains the original controller-estimated behavior.
     klvr_null.hand_tracking_enabled = 0;

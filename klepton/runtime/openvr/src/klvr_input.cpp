@@ -135,6 +135,7 @@ struct Action {
     bool read_said = false;      // Share Diagnostics carries, so a dead button shows where its press stopped
     bool analog_polled = false;  // KLVR_TRACE_ACTIONS: the game has polled this analog action
     bool analog_on = false;      // ...and has read it deflected since it was last at rest
+    uint8_t hand_pose_logged = 0; // native placement: once per action/hand, under g_mu
     int callers_shown = 0;       // KLVR_TRACE_CALLERS
 };
 
@@ -158,6 +159,17 @@ int driven_by(const Binding &b) { return g_mirror ? b.hand ^ 1 : b.hand; }
 std::string g_manifest_dir;
 std::atomic<bool> g_uses_input{false};  // an action manifest is set: no legacy input (legacy_controller_state)
 double g_last_update = 0;
+
+// Independent native-hand budgets preserve the first live samples even if
+// startup probes every reference pose: 8 poses + 16 references + 8 bone
+// variants + 2 capabilities + 2 metadata calls = at most 36 process lines.
+std::atomic<unsigned> g_hand_pose_trace_lines{0};
+bool hand_pose_trace_line() { return g_hand_pose_trace_lines.fetch_add(1, std::memory_order_relaxed) < 8; }
+bool hand_trace_once(std::atomic<uint32_t> &seen, unsigned slot) {
+    if (slot >= 32) return false;
+    const uint32_t bit = 1u << slot;
+    return !(seen.fetch_or(bit, std::memory_order_relaxed) & bit);
+}
 
 // Handles: action = index + 1, set = index + 1 | kSetTag. Zero is invalid.
 constexpr uint64_t kSetTag = 1ull << 32;
@@ -825,6 +837,22 @@ static vr::EVRInputError pose_at(vr::VRActionHandle_t h, vr::ETrackingUniverseOr
     out->pose.bDeviceIsConnected = c.connected;
     out->bActive = c.connected;
     out->activeOrigin = hand ? kRight : kLeft;
+    if (klvr_plat_hand_tracking_enabled() && out->pose.bPoseIsValid) {
+        std::lock_guard<std::mutex> l(g_mu);
+        Action *a = action_of(h);
+        const uint8_t bit = uint8_t(1u << hand);
+        if (a && !(a->hand_pose_logged & bit)) {
+            a->hand_pose_logged |= bit;
+            if (hand_pose_trace_line()) {
+                const auto &m = out->pose.mDeviceToAbsoluteTracking.m;
+                logf("hands pose action=%.96s type=%d binding=%.24s hand=%d universe=%d restrict=%llu matrix=[%.3f %.3f %.3f %.3f; %.3f %.3f %.3f %.3f; %.3f %.3f %.3f %.3f]",
+                     a->name.c_str(), int(a->type), pose.empty() ? "raw" : pose.c_str(), hand, int(u),
+                     (unsigned long long)restrict_to,
+                     m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
+                     m[2][0], m[2][1], m[2][2], m[2][3]);
+            }
+        }
+    }
     return vr::VRInputError_None;
 }
 
@@ -923,6 +951,14 @@ vr::EVRInputError IVRInput__GetSkeletalReferenceTransforms(void *, vr::VRActionH
     skel_reference(hand, which, xf);
     to_space(space, xf);
     memcpy(out, xf, sizeof xf);
+    static std::atomic<uint32_t> seen{0};
+    if (klvr_plat_hand_tracking_enabled() && unsigned(space) < 2 && unsigned(which) < 4
+            && hand_trace_once(seen, unsigned(hand * 8 + int(space) * 4 + int(which)))) {
+        const auto &w = xf[1];
+        logf("hands reference hand=%d space=%d which=%d wrist.p=(%.4f %.4f %.4f) wrist.q.xyzw=(%.4f %.4f %.4f %.4f)",
+             hand, int(space), int(which), w.position.v[0], w.position.v[1], w.position.v[2],
+             w.orientation.x, w.orientation.y, w.orientation.z, w.orientation.w);
+    }
     return vr::VRInputError_None;
 }
 
@@ -934,7 +970,15 @@ vr::EVRInputError IVRInput__GetSkeletalTrackingLevel(void *, vr::VRActionHandle_
         int hand;
         vr::EVRInputError e = skeleton_hand(h, hand);
         if (e && e != vr::VRInputError_NoData) return e;
-        if (!e && klvr_plat_skeleton(hand, nullptr, nullptr, nullptr)) *out = vr::VRSkeletalTracking_Full;
+        // This is device capability, including before the first sample and
+        // during occlusion. Availability is bActive/NoData, not a new device
+        // class that a game may cache while initializing its hand model.
+        if (!e) {
+            *out = vr::VRSkeletalTracking_Full;
+            static std::atomic<uint32_t> seen{0};
+            if (hand_trace_once(seen, unsigned(hand)))
+                logf("hands tracking-level hand=%d result=%d capability=full", hand, int(*out));
+        }
     }
     return vr::VRInputError_None;
 }
@@ -964,6 +1008,17 @@ vr::EVRInputError IVRInput__GetSkeletalBoneData(void *, vr::VRActionHandle_t h, 
     }
     to_space(space, xf);
     memcpy(out, xf, sizeof xf);
+    static std::atomic<uint32_t> seen{0};
+    if (klvr_plat_hand_tracking_enabled() && unsigned(space) < 2 && unsigned(range) < 2
+            && hand_trace_once(seen, unsigned(hand * 4 + int(space) * 2 + int(range)))) {
+        const auto &r = xf[0];
+        const auto &w = xf[1];
+        logf("hands bones hand=%d space=%d range=%d root.p=(%.4f %.4f %.4f) root.q.xyzw=(%.4f %.4f %.4f %.4f) wrist.p=(%.4f %.4f %.4f) wrist.q.xyzw=(%.4f %.4f %.4f %.4f)",
+             hand, int(space), int(range), r.position.v[0], r.position.v[1], r.position.v[2],
+             r.orientation.x, r.orientation.y, r.orientation.z, r.orientation.w,
+             w.position.v[0], w.position.v[1], w.position.v[2],
+             w.orientation.x, w.orientation.y, w.orientation.z, w.orientation.w);
+    }
     return vr::VRInputError_None;
 }
 
@@ -1074,9 +1129,12 @@ vr::EVRInputError IVRInput__GetOriginTrackedDeviceInfo(void *, vr::VRInputValueH
     return vr::VRInputError_None;
 }
 
-vr::EVRInputError IVRInput__GetActionBindingInfo(void *, vr::VRActionHandle_t, vr::InputBindingInfo_t *, uint32_t, uint32_t,
+vr::EVRInputError IVRInput__GetActionBindingInfo(void *, vr::VRActionHandle_t h, vr::InputBindingInfo_t *, uint32_t, uint32_t,
                                                  uint32_t *returned) {
     if (returned) *returned = 0;
+    static std::atomic<uint32_t> seen{0};
+    if (klvr_plat_hand_tracking_enabled() && hand_trace_once(seen, 0))
+        logf("hands binding-info action=%llu returned=0", (unsigned long long)h);
     return vr::VRInputError_None;
 }
 vr::EVRInputError IVRInput__ShowActionOrigins(void *, vr::VRActionSetHandle_t, vr::VRActionHandle_t) { return vr::VRInputError_None; }
@@ -1092,6 +1150,9 @@ vr::EVRInputError IVRInput__GetBindingVariant(void *, vr::VRInputValueHandle_t, 
 }
 vr::EVRInputError IVRInput__GetComponentStateForBinding(void *, const char *, const char *, const vr::InputBindingInfo_t *,
                                                         uint32_t, uint32_t, vr::RenderModel_ComponentState_t *) {
+    static std::atomic<uint32_t> seen{0};
+    if (klvr_plat_hand_tracking_enabled() && hand_trace_once(seen, 0))
+        logf("hands component-for-binding result=NoData");
     return vr::VRInputError_NoData;
 }
 bool IVRInput__IsUsingLegacyInput(void *) { return false; }
