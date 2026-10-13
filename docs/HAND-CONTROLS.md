@@ -15,7 +15,13 @@ Its playtest improved menu placement but still showed incorrect position and rot
 Build **1013.4.1** replaces that reference-only experiment. Valve's original reference skeleton is restored;
 the raw placement pose and live skeleton are rebased together so the canonical wrist lands at the measured
 wrist. Finger world transforms are preserved, and pose/bone queries share one display-frame sample. This
-changes the raw hand axes too; menu aiming and gameplay alignment both still need a headset playtest.
+changes the raw hand axes too. The headset playtest confirmed that the hands now feel aligned, but grabbing
+still felt unnatural and seemed to require an index pinch.
+
+Build **1013.5.1** keeps that placement and changes only grasp recognition: a curved hand around an object
+can activate grip without closing into a tight fist or pinching thumb and index. Opening the fingers releases
+grip. Once grasp debounce starts, incidental thumb contact cannot switch it into movement or a button press.
+This improves gesture input; Alyx still decides which nearby object to attach and how to hold it.
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.
@@ -43,7 +49,7 @@ two of middle/ring/little open to distinguish a button press from a fist grip.
 | Gesture | Controller input / intended action |
 | --- | --- |
 | Index finger + thumb | Trigger: select or fire |
-| Curl at least two of middle, ring and little fingers | Grip: hold or grab |
+| Curve at least two of middle, ring and little fingers around the object | Grip: hold or grab; open to release |
 | Middle finger + thumb, then move that hand | Virtual stick: left moves; right turns, or pull back for teleport |
 | Hold middle finger + thumb still for 0.8 seconds | One click of that hand's virtual stick |
 | Ring finger + thumb | Left X / right A, held until release |
@@ -84,7 +90,10 @@ head-relative stick. It leaves the saved movement preference unchanged; Sense mo
 - Only one pinch is recognized per hand at a time. Grip can combine with an index trigger, but
   an existing movement/button pinch suppresses grip. An active grip is protected from incidental
   middle/ring/little contact with the thumb; those fingers must open before starting another gesture.
-  Two tracked curled fingers suffice for grip, and an accepted grip survives up to 120 ms of missing
+  Two tracked curved fingers suffice for grip: 0.45 curl to acquire, 0.25 to release, with a 50 ms
+  acquisition debounce. In this normalized measure, those correspond to roughly 84° and 60° between
+  proximal and distal finger segments; the former 0.80 threshold required about 127°.
+  An accepted grip survives up to 120 ms of missing
   curl data while the hand itself remains tracked. Opening the fingers releases immediately.
 - Missing finger skeleton data no longer disconnects a valid palm pose or drops its controller buttons.
   Skeletal queries still report unavailable data, and placement keeps the last valid wrist calibration.

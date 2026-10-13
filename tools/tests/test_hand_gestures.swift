@@ -15,6 +15,8 @@ struct HandGestureTests {
         adjacentFingerArbitration()
         exclusivityAndHysteresis()
         gripAndTrigger()
+        cylindricalGraspGeometry()
+        pendingGraspArbitration()
         gripEvidenceAndOcclusion()
         heldGripOwnsCurledFingers()
         navigationDoesNotGrab()
@@ -352,8 +354,119 @@ struct HandGestureTests {
         expect(output.trigger == 1 && output.grip == 1, "Deliberate grip and trigger coexist")
         output = gestures.update(sample: sample(index: 0.028, curl: 0.65), at: 0.2, hand: 0)
         expect(output.trigger == 1 && output.grip == 1, "Grip has independent hysteresis")
-        output = gestures.update(sample: sample(index: 0.028, curl: 0.5), at: 0.3, hand: 0)
+        output = gestures.update(sample: sample(index: 0.028, curl: 0.2), at: 0.3, hand: 0)
         expect(output.trigger == 1 && output.grip == 0, "Relaxing grip leaves trigger held")
+    }
+
+    // Straight segments tangent to the same cylindrical wrap. Joint bend is
+    // obtained from actual chord directions, not from the recognizer cutoff.
+    private static func fingerChain(radius: Float?, lengths: [Float], offset: Float = 0) -> [SIMD3<Float>] {
+        var points = [SIMD3<Float>(0, 0, offset)]
+        var angle: Float = 0
+        for length in lengths {
+            if let radius {
+                angle += 2 * asin(length / (2 * radius))
+                points.append(SIMD3(radius * (cos(angle) - 1), radius * sin(angle), offset))
+            } else {
+                points.append(points.last! + SIMD3(length, 0, 0))
+            }
+        }
+        return points
+    }
+
+    private static func chainCurl(_ points: [SIMD3<Float>]) -> Float? {
+        KleptonGestureSample.fingerCurl(knuckle: points[0], base: points[1],
+                                       distal: points[2], tip: points[3])
+    }
+
+    private static func graspGeometry(radius: Float?) -> KleptonGestureSample {
+        let middle = fingerChain(radius: radius, lengths: [0.040, 0.025, 0.020])
+        let ring = fingerChain(radius: radius, lengths: [0.038, 0.024, 0.018], offset: 0.018)
+        let little = fingerChain(radius: radius, lengths: [0.030, 0.020, 0.016], offset: 0.035)
+        return .fromFingertips(thumb: SIMD3(0, 0, 0.18), index: SIMD3(0.09, 0, -0.02),
+                               middle: middle[3], ring: ring[3], little: little[3],
+                               middleCurl: chainCurl(middle), ringCurl: chainCurl(ring), littleCurl: chainCurl(little),
+                               position: .zero, stickRight: SIMD3(1, 0, 0), stickForward: SIMD3(0, 0, -1))
+    }
+
+    private static func cylindricalGraspGeometry() {
+        let relaxed = graspGeometry(radius: 0.08), opened = graspGeometry(radius: nil)
+        expect(opened.gripCurl == 0, "Straight finger geometry has zero curl")
+        for radius: Float in [0.030, 0.035] {
+            let wrapped = graspGeometry(radius: radius)
+            expect(wrapped.indexPinch! > 0.08 && wrapped.middlePinch! > 0.08,
+                   "Cylindrical grasp fixture has no thumb/index or thumb/middle contact")
+            var gestures = KleptonHandGestures()
+            expect(neutral(gestures.update(sample: relaxed, at: 0, hand: 0)),
+                   "A relaxed curved hand stays neutral and can arm a grasp")
+            expect(neutral(gestures.update(sample: wrapped, at: 0.1, hand: 0)),
+                   "A natural cylindrical grasp still requires stable closure")
+            let held = gestures.update(sample: wrapped, at: 0.16, hand: 0)
+            expect(held.grip == 1 && held.trigger == 0 && held.stick == .zero,
+                   "Wrapping differently sized fingers around a 30–35 mm radius cylinder grabs without pinching")
+            expect(gestures.update(sample: graspGeometry(radius: 0.04), at: 0.2, hand: 0).grip == 1,
+                   "A slightly loosened wrap remains held through grip hysteresis")
+            expect(neutral(gestures.update(sample: relaxed, at: 0.3, hand: 0)),
+                   "Relaxing the cylindrical wrap releases without a thumb gesture")
+            expect(neutral(gestures.update(sample: opened, at: 0.4, hand: 0)),
+                   "An open hand remains neutral after release")
+        }
+
+        let original = fingerChain(radius: 0.035, lengths: [0.04, 0.025, 0.02])
+        let rotation = simd_quatf(angle: 1.1, axis: simd_normalize(SIMD3<Float>(1, 2, 3)))
+        for scale: Float in [0.8, 1.2] {
+            let moved = original.map { rotation.act($0 * scale) + SIMD3(0.6, 1.2, -0.4) }
+            expect(abs(chainCurl(moved)! - chainCurl(original)!) < 0.00001,
+                   "Measured wrap is invariant to hand size, room translation and rotation")
+        }
+        expect(KleptonGestureSample.fingerCurl(knuckle: original[0], base: nil,
+                                               distal: original[2], tip: original[3]) == nil,
+               "Missing joints cannot supply cylindrical grasp evidence")
+        expect(chainCurl([.zero, .zero, SIMD3(0.01, 0, 0), SIMD3(0.02, 0, 0)]) == nil,
+               "A collapsed bone cannot supply grasp evidence")
+    }
+
+    private static func pendingGraspArbitration() {
+        let wrapped = graspGeometry(radius: 0.035)
+        var gestures = KleptonHandGestures()
+        _ = gestures.update(sample: graspGeometry(radius: nil), at: 0, hand: 0)
+        _ = gestures.update(sample: wrapped, at: 0.1, hand: 0)
+        var brush = wrapped
+        brush.middlePinch = 0.03
+        expect(neutral(gestures.update(sample: brush, at: 0.111, hand: 0)),
+               "Thumb brush cannot steal a cylindrical grasp already being debounced")
+        let held = gestures.update(sample: brush, at: 0.16, hand: 0)
+        expect(held.grip == 1 && held.stick == .zero && held.trigger == 0,
+               "Pending cylindrical grasp completes while the thumb brushes the middle finger")
+        brush.position.x = 0.08
+        expect(gestures.update(sample: brush, at: 0.2, hand: 0).stick == .zero,
+               "The incidental brush never starts locomotion")
+
+        // Intent already owned by a deliberate middle pinch is preserved,
+        // including release while the remaining fingers are still wrapped.
+        var navigation = armed()
+        let clutch = sample(middle: 0.03)
+        _ = navigation.update(sample: clutch, at: 0.1, hand: 0)
+        _ = navigation.update(sample: clutch, at: 0.122, hand: 0)
+        let moving = navigation.update(sample: brush, at: 0.16, hand: 0)
+        expect(moving.stick.x > 0.99 && moving.grip == 0,
+               "A cylindrical wrap cannot steal an already active movement pinch")
+        _ = navigation.update(sample: wrapped, at: 0.2, hand: 0)
+        expect(navigation.update(sample: wrapped, at: 0.3, hand: 0).grip == 0,
+               "Releasing navigation with curled fingers does not auto-grab")
+        _ = navigation.update(sample: graspGeometry(radius: nil), at: 0.4, hand: 0)
+        _ = navigation.update(sample: wrapped, at: 0.5, hand: 0)
+        expect(navigation.update(sample: wrapped, at: 0.56, hand: 0).grip == 1,
+               "Relaxing after navigation permits a new deliberate cylindrical grasp")
+
+        var simultaneous = armed()
+        brush.position = .zero
+        _ = simultaneous.update(sample: brush, at: 0.1, hand: 0)
+        _ = simultaneous.update(sample: brush, at: 0.122, hand: 0)
+        brush.position.x = 0.08
+        let input = simultaneous.update(sample: brush, at: 0.16, hand: 0)
+        expect(input.stick.x > 0.99 && input.grip == 0,
+               "A simultaneous fresh middle pinch retains its existing priority over incidental curl")
     }
 
     private static func gripEvidenceAndOcclusion() {

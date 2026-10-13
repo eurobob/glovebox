@@ -79,14 +79,10 @@ enum KleptonHandInput {
             let v = SIMD3<Float>(p.x, p.y, p.z)
             return v.x.isFinite && v.y.isFinite && v.z.isFinite ? v : nil
         }
-        // The bend between the first and last finger bones is independent of
-        // hand size and of the hand's rotation in the room.
         func curl(_ knuckle: HandSkeleton.JointName, _ base: HandSkeleton.JointName,
                   _ distal: HandSkeleton.JointName, _ tip: HandSkeleton.JointName) -> Float? {
-            guard let a = point(knuckle), let b = point(base),
-                  let c = point(distal), let d = point(tip),
-                  simd_length(b - a) > 0.001, simd_length(d - c) > 0.001 else { return nil }
-            return max(0, min(1, (1 - simd_dot(simd_normalize(b - a), simd_normalize(d - c))) * 0.5))
+            KleptonGestureSample.fingerCurl(knuckle: point(knuckle), base: point(base),
+                                          distal: point(distal), tip: point(tip))
         }
         let mc = curl(.middleFingerKnuckle, .middleFingerIntermediateBase, .middleFingerIntermediateTip, .middleFingerTip)
         let rc = curl(.ringFingerKnuckle, .ringFingerIntermediateBase, .ringFingerIntermediateTip, .ringFingerTip)

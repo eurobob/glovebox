@@ -8,9 +8,8 @@ installs it on your headset.
 
 This fork is based on **upstream Glovebox 0.1.5** and adds **experimental hand controls** alongside
 PS VR2 Sense. Choose **Hands (Experimental)** or **PS VR2 Sense** in the headset launcher; Hands is the default.
-Individual finger articulation works, but headset playtests still show substantial hand rotation and
-position errors. The current candidate replaces the unsuccessful reference-only correction with a shared
-placement transform for raw poses and the live skeleton; reliable alignment still needs a headset playtest.
+Headset testing of build 1013.4.1 confirmed that the tracked hands now feel aligned.
+Object interaction remains experimental; the current work improves recognition of a curved-hand grasp.
 Returning players get Play immediately from their completed
 local installation, with routine Steam checks in the background.
 Upstream Glovebox remains Sense-only.

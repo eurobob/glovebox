@@ -423,6 +423,8 @@ final class KleptonControllers {
     private var gestureInvalidFrames = [0, 0]
     private var gestureIndexFrames = [0, 0]
     private var gesturePressFrames = [0, 0]
+    private var gestureGripFrames = [0, 0]
+    private var gesturePeakCurl: [Float] = [0, 0]
     private var gestureClosest: [Float] = [.infinity, .infinity]
     private var gestureNextReport: TimeInterval = 0
     private var loggedHandBuild = false
@@ -1938,6 +1940,10 @@ final class KleptonControllers {
                 gestureClosest[hand] = min(gestureClosest[hand], distance)
             }
             if output.trigger > 0 { gesturePressFrames[hand] += 1 }
+            if output.grip > 0 { gestureGripFrames[hand] += 1 }
+            if let curl = sample?.gripCurl, curl.isFinite {
+                gesturePeakCurl[hand] = max(gesturePeakCurl[hand], curl)
+            }
             let motion = handMotion[hand].update(position: p, orientation: q, at: time)
             var st = KleptonHandState()
             st.position = p; st.orientation = q
@@ -1977,12 +1983,14 @@ final class KleptonControllers {
         func summary(_ hand: Int) -> String {
             let closest = gestureClosest[hand].isFinite
                 ? String(format: "%.1f mm", gestureClosest[hand] * 1000) : "untracked"
-            return "pose \(gesturePoseFrames[hand]), missing \(gestureMissingFrames[hand]), ARKit-untracked \(gestureUntrackedFrames[hand]), invalid \(gestureInvalidFrames[hand]), index \(gestureIndexFrames[hand]), trigger \(gesturePressFrames[hand]), closest \(closest)"
+            let curl = String(format: "%.2f", gesturePeakCurl[hand])
+            return "pose \(gesturePoseFrames[hand]), missing \(gestureMissingFrames[hand]), ARKit-untracked \(gestureUntrackedFrames[hand]), invalid \(gestureInvalidFrames[hand]), index \(gestureIndexFrames[hand]), trigger \(gesturePressFrames[hand]), grip \(gestureGripFrames[hand]), curl peak \(curl), closest \(closest)"
         }
         NSLog("[hands] %d frames: L %@ | R %@", gestureFrames, summary(0), summary(1))
         gestureFrames = 0
         gesturePoseFrames = [0, 0]; gestureIndexFrames = [0, 0]
         gestureMissingFrames = [0, 0]; gestureUntrackedFrames = [0, 0]; gestureInvalidFrames = [0, 0]
         gesturePressFrames = [0, 0]; gestureClosest = [.infinity, .infinity]
+        gestureGripFrames = [0, 0]; gesturePeakCurl = [0, 0]
     }
 }

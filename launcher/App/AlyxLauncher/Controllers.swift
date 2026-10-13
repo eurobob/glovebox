@@ -144,7 +144,7 @@ struct InputControlsSheet: View {
                         Text("Keep both hands in view. Pinch a fingertip to your thumb, then release to reset. Middle pinch works with the other fingers relaxed. For ring/little pinches, keep the other two of those three fingers open.")
                             .foregroundStyle(.secondary)
                         control("Index + thumb", "Trigger: select and fire")
-                        control("Curl middle, ring and little fingers", "Grip: hold and grab")
+                        control("Curve your fingers around an object", "Grip: hold; open your hand to release")
                         control("Middle + thumb, then move your hand", "Virtual stick: left hand moves; right hand turns. Pull the right hand back to teleport.")
                         control("Hold middle + thumb still for 0.8 seconds", "Click that hand's virtual stick")
                         control("Ring + thumb", "Left hand: X · Right hand: A")

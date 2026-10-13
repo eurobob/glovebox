@@ -17,6 +17,19 @@ struct KleptonGestureSample {
     var stickRight: SIMD3<Float>
     var stickForward: SIMD3<Float>
 
+    /// Bend between the proximal and distal bones: straight = 0, opposing = 1.
+    /// Rigid hand rotation and finger length do not change this measurement.
+    static func fingerCurl(knuckle: SIMD3<Float>?, base: SIMD3<Float>?,
+                           distal: SIMD3<Float>?, tip: SIMD3<Float>?) -> Float? {
+        guard let knuckle, let base, let distal, let tip else { return nil }
+        let proximalDirection = base - knuckle, distalDirection = tip - distal
+        let proximalLength = simd_length(proximalDirection), distalLength = simd_length(distalDirection)
+        guard proximalLength.isFinite, distalLength.isFinite,
+              proximalLength > 0.001, distalLength > 0.001 else { return nil }
+        let cosine = simd_dot(proximalDirection / proximalLength, distalDirection / distalLength)
+        return max(0, min(1, (1 - cosine) * 0.5))
+    }
+
     /// Shared by ARKit and the pure geometry tests. Index selection and middle
     /// navigation need only their own fingertip and the thumb. A naturally
     /// folded or occluded ring/little finger must not erase a middle pinch.
@@ -97,8 +110,10 @@ struct KleptonHandGestures {
         var debounce: Double { self == .index || self == .middle ? 0.02 : 0.05 }
     }
 
-    private static let gripDown: Float = 0.80
-    private static let gripUp: Float = 0.55
+    // A cylindrical wrap needs about 84 degrees of proximal-to-distal bend,
+    // not the former 127-degree near-fist. Opening below 60 degrees releases.
+    private static let gripDown: Float = 0.45
+    private static let gripUp: Float = 0.25
     private static let debounce: Double = 0.05
     private static let longPress: Double = 0.8
     private static let pulseDuration: Double = 0.12
@@ -156,8 +171,12 @@ struct KleptonHandGestures {
         if sample.gripCurl != nil { lastGripTrackedAt = time }
         let retainUnknownGrip = gripActive && gripUnknown
             && lastGripTrackedAt.map { time - $0 <= Self.gripOcclusionGrace } == true
-        let protectGrip = gripActive && (retainUnknownGrip
-            || sample.gripCurl.map { $0 > Self.gripUp } == true)
+        // A grip already being debounced owns a later thumb brush. Existing
+        // navigation and simultaneous fresh pinches retain their priority.
+        let pendingGrip = gripSince != nil && !gripNeedsRelax
+            && sample.gripCurl.map { $0 >= Self.gripDown } == true
+        let protectGrip = pendingGrip || (gripActive && (retainUnknownGrip
+            || sample.gripCurl.map { $0 > Self.gripUp } == true))
         let headingValid = Self.validHeading(sample)
 
         var output = KleptonGestureOutput.neutral
@@ -200,7 +219,7 @@ struct KleptonHandGestures {
             if distance >= pinch.up { armedPinches.insert(pinch) }
             // A held object's curled fingers may brush the thumb. They must
             // open again before being interpreted as navigation/face input.
-            if gripActive, pinch != .index, distance < pinch.up {
+            if protectGrip, pinch != .index, distance < pinch.up {
                 armedPinches.remove(pinch)
             }
         }
