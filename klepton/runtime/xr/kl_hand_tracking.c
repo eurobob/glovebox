@@ -12,11 +12,17 @@ typedef struct {
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static hand_snapshot g_hand[2];
 static int g_enabled;
+static int g_palm_valid[2];
+static uint64_t g_generation;
 
 void kl_hand_tracking_set_enabled(int enabled) {
     pthread_mutex_lock(&g_lock);
     enabled = enabled != 0;
-    if (g_enabled != enabled) memset(g_hand, 0, sizeof g_hand);
+    if (g_enabled != enabled) {
+        memset(g_hand, 0, sizeof g_hand);
+        memset(g_palm_valid, 0, sizeof g_palm_valid);
+        g_generation++;
+    }
     g_enabled = enabled;
     pthread_mutex_unlock(&g_lock);
 }
@@ -26,6 +32,28 @@ int kl_hand_tracking_enabled(void) {
     int enabled = g_enabled;
     pthread_mutex_unlock(&g_lock);
     return enabled;
+}
+
+uint64_t kl_hand_tracking_generation(void) {
+    pthread_mutex_lock(&g_lock);
+    uint64_t value = g_generation;
+    pthread_mutex_unlock(&g_lock);
+    return value;
+}
+
+void kl_hand_tracking_set_palm_valid(int hand, int valid) {
+    if (hand < 0 || hand > 1) return;
+    pthread_mutex_lock(&g_lock);
+    g_palm_valid[hand] = g_enabled && valid;
+    pthread_mutex_unlock(&g_lock);
+}
+
+int kl_hand_tracking_palm_valid(int hand) {
+    if (hand < 0 || hand > 1) return 0;
+    pthread_mutex_lock(&g_lock);
+    int valid = g_enabled && g_palm_valid[hand];
+    pthread_mutex_unlock(&g_lock);
+    return valid;
 }
 
 void kl_hand_tracking_clear(int hand) {

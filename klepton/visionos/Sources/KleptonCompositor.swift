@@ -753,10 +753,13 @@ final class KleptonCompositor {
     /// Called once per frame, *before* kl_app_frame(), so the guest renders
     /// with this frame's pose rather than the previous one's — the same
     /// ordering reason the Choreographer is ticked before nativeRender.
-    private func updatePoses(at presentationTime: TimeInterval) {
+    private func updatePoses(at presentationTime: TimeInterval, handTime: TimeInterval) {
+        // ARKit's hand prediction target differs from the device/display target. Date native
+        // hand gesture and velocity samples with the same instant used to query their anchors.
+        let inputTime = KleptonHandInput.enabled ? handTime : presentationTime
         guard arRunning else {
             if KleptonHandInput.enabled {
-                controllers.update(leftHand: nil, rightHand: nil, at: presentationTime)
+                controllers.update(leftHand: nil, rightHand: nil, at: inputTime)
             }
             return
         }
@@ -809,22 +812,25 @@ final class KleptonCompositor {
         // is the pinch trigger, and neither is recoverable from the anchor
         // origin alone.
         //
-        // Predicted to the presentation time, like the head above and like the
-        // Sense controllers inside `update`. `latestAnchors` is the last sample
-        // the tracker delivered, which arrives well below display rate — so a
-        // 90 Hz render loop reading it draws the same hand pose for two or
-        // three frames running, and hands do not hold still that long. That
-        // reads as the hands running at a third of the frame rate, which is
-        // exactly what it is.
+        // Apple specifies trackableAnchorTime for predicted hand anchors and presentationTime
+        // for the device anchor. The offset varies per frame. Keep the existing Sense sampling
+        // path while using the trackable target for native hands. Display-aligned latest/async
+        // hand updates are a separate API; do not mask a failed prediction with a stale sample.
         var left: HandAnchor?, right: HandAnchor?
         #if !KL_NO_HANDS
         if handsWanted {
-            let hands = handTracking.handAnchors(at: presentationTime)
-            if let a = hands.leftHand,  a.isTracked { left  = a }
-            if let a = hands.rightHand, a.isTracked { right = a }
+            let hands = handTracking.handAnchors(at: inputTime)
+            if KleptonHandInput.enabled {
+                // The gesture adapter still releases untracked hands. Preserve the provider's
+                // distinction between no anchor and an explicitly untracked anchor for diagnostics.
+                left = hands.leftHand; right = hands.rightHand
+            } else {
+                if let a = hands.leftHand,  a.isTracked { left  = a }
+                if let a = hands.rightHand, a.isTracked { right = a }
+            }
         }
         #endif
-        controllers.update(leftHand: left, rightHand: right, at: presentationTime,
+        controllers.update(leftHand: left, rightHand: right, at: inputTime,
                            head: headAnchor?.isTracked == true ? headAnchor?.originFromAnchorTransform : nil)
         // ...and the same seam in the other direction: whatever the guest
         // queued for the controllers to play. Here rather than inside `update`
@@ -2126,8 +2132,8 @@ final class KleptonCompositor {
 
         // Poses first, then the frame that uses them.
         if let timing {
-            updatePoses(at: LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime)
-                            .timeInterval)
+            updatePoses(at: LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime).timeInterval,
+                        handTime: LayerRenderer.Clock.Instant.epoch.duration(to: timing.trackableAnchorTime).timeInterval)
         }
 
         // Offer the guest this frame's pose and carry straight on. The guest

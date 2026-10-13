@@ -10,7 +10,7 @@ struct KleptonGestureSample {
     var middlePinch: Float?
     var ringPinch: Float?
     var littlePinch: Float?
-    // Minimum curl of the middle, ring and little fingers: open = 0, fist = 1.
+    // Curl supported by at least two fingers: open = 0, fist = 1.
     var gripCurl: Float?
     var position: SIMD3<Float>
     // Head-relative world-space axes. The clutch freezes these at activation.
@@ -35,12 +35,13 @@ struct KleptonGestureSample {
             guard let a = others.0, let b = others.1, a < 0.5, b < 0.5 else { return nil }
             return distance(to: tip)
         }
-        let grip: Float?
-        if let middleCurl, let ringCurl, let littleCurl {
-            grip = min(middleCurl, ringCurl, littleCurl)
-        } else {
-            grip = nil
-        }
+        // Fist tips often occlude one another. Two tracked curled fingers are
+        // enough evidence; one finger alone cannot start or sustain a grab.
+        let curls = [middleCurl, ringCurl, littleCurl].compactMap { value -> Float? in
+            guard let value, value.isFinite, (0...1).contains(value) else { return nil }
+            return value
+        }.sorted(by: >)
+        let grip = curls.count >= 2 ? curls[1] : nil
         return Self(indexPinch: distance(to: index), middlePinch: distance(to: middle),
                     ringPinch: faceDistance(to: ring, others: (middleCurl, littleCurl)),
                     littlePinch: faceDistance(to: little, others: (middleCurl, ringCurl)),
@@ -73,7 +74,8 @@ struct KleptonGestureOutput {
 ///
 /// Trigger and grip are deliberately digital, represented as 0/1 floats.
 /// Pinch hysteresis avoids flickering fire around an analog press threshold;
-/// an accepted index press lasts at least 60 ms unless its tracking is lost.
+/// an accepted index press lasts at least 60 ms. Brief individual-joint loss
+/// can retain an accepted trigger/grip; whole-hand loss always releases both.
 struct KleptonHandGestures {
     private enum Pinch: CaseIterable, Hashable {
         case index, middle, ring, little
@@ -101,6 +103,8 @@ struct KleptonHandGestures {
     private static let longPress: Double = 0.8
     private static let pulseDuration: Double = 0.12
     private static let minimumTriggerPress: Double = 0.06
+    private static let indexOcclusionGrace: Double = 0.06
+    private static let gripOcclusionGrace: Double = 0.12
     private static let stickDeadZone: Float = 0.01
     private static let stickFullScale: Float = 0.08
     private static let pinchLead: Float = 0.003
@@ -120,6 +124,8 @@ struct KleptonHandGestures {
     private var gripActive = false
     private var gripSince: Double?
     private var gripNeedsRelax = true
+    private var lastIndexTrackedAt: Double?
+    private var lastGripTrackedAt: Double?
     private var triggerPulseUntil: Double = 0
     private var secondaryPulseUntil: Double = 0
     private var menuPulseUntil: Double = 0
@@ -139,17 +145,33 @@ struct KleptonHandGestures {
 
         // A missing/invalid joint only invalidates its own control. In
         // particular, selecting with thumb/index never needs ring/little curl.
+        let indexUnknown = sample.indexPinch == nil
+        let gripUnknown = sample.gripCurl == nil
         sample.indexPinch = Self.validScalar(sample.indexPinch, range: 0...0.5)
         sample.middlePinch = Self.validScalar(sample.middlePinch, range: 0...0.5)
         sample.ringPinch = Self.validScalar(sample.ringPinch, range: 0...0.5)
         sample.littlePinch = Self.validScalar(sample.littlePinch, range: 0...0.5)
         sample.gripCurl = Self.validScalar(sample.gripCurl, range: 0...1)
+        if sample.indexPinch != nil { lastIndexTrackedAt = time }
+        if sample.gripCurl != nil { lastGripTrackedAt = time }
+        let retainUnknownGrip = gripActive && gripUnknown
+            && lastGripTrackedAt.map { time - $0 <= Self.gripOcclusionGrace } == true
+        let protectGrip = gripActive && (retainUnknownGrip
+            || sample.gripCurl.map { $0 > Self.gripUp } == true)
         let headingValid = Self.validHeading(sample)
 
         var output = KleptonGestureOutput.neutral
         var released = false
         for pinch in Pinch.allCases {
             guard let distance = pinch.distance(in: sample) else {
+                // Contact itself can hide the index/thumbnail for a frame.
+                // Only an already accepted press gets this bounded grace;
+                // unknown tracking can never start or extend a new press.
+                if pinch == .index, indexUnknown,
+                   active == .index || time < triggerPulseUntil,
+                   lastIndexTrackedAt.map({ time - $0 <= Self.indexOcclusionGrace }) == true {
+                    continue
+                }
                 armedPinches.remove(pinch)
                 if candidate == pinch { candidate = nil }
                 if active == pinch {
@@ -176,6 +198,11 @@ struct KleptonHandGestures {
             // Each channel must independently see a tracked open sample after
             // startup/loss. An unrelated occlusion never unarms this channel.
             if distance >= pinch.up { armedPinches.insert(pinch) }
+            // A held object's curled fingers may brush the thumb. They must
+            // open again before being interpreted as navigation/face input.
+            if gripActive, pinch != .index, distance < pinch.up {
+                armedPinches.remove(pinch)
+            }
         }
         if let active, let distance = active.distance(in: sample), distance >= active.up {
             if active == .little, hand == 0, !holdDidFire {
@@ -210,6 +237,7 @@ struct KleptonHandGestures {
             let nearest: Pinch?
             if let (pinch, distance) = closest,
                armedPinches.contains(pinch), distance <= pinch.down,
+               !protectGrip || pinch == .index,
                observed.allSatisfy({ $0.0 == pinch || $0.1 - distance >= Self.pinchLead }) {
                 nearest = pinch
             } else {
@@ -234,7 +262,7 @@ struct KleptonHandGestures {
                 }
                 if candidate == .index {
                     // A 45 Hz guest must observe an accepted quick selection.
-                    // Tracking loss cancels this floor immediately.
+                    // Whole-hand loss cancels this floor immediately.
                     triggerPulseUntil = time + Self.minimumTriggerPress
                 }
                 self.candidate = nil
@@ -245,7 +273,7 @@ struct KleptonHandGestures {
         // turn that incidental curl into a grab, even immediately on release.
         let pinch = active ?? candidate
         let blocksGrip = hasOtherPulse || (pinch.map { $0 != .index } ?? false)
-        if blocksGrip || sample.gripCurl == nil {
+        if blocksGrip || (sample.gripCurl == nil && !retainUnknownGrip) {
             gripNeedsRelax = true
             gripActive = false
             gripSince = nil

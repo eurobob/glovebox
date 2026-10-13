@@ -33,6 +33,11 @@ int main(void) {
     assert(!kl_hand_tracking_read(0, out, co, so, 100));
     kl_hand_tracking_set_enabled(1);
     assert(kl_hand_tracking_enabled());
+    uint64_t generation = kl_hand_tracking_generation();
+    assert(!kl_hand_tracking_palm_valid(0) && !kl_hand_tracking_palm_valid(1));
+    kl_hand_tracking_set_palm_valid(0, 1);
+    kl_hand_tracking_set_palm_valid(1, 1);
+    assert(kl_hand_tracking_palm_valid(0) && kl_hand_tracking_palm_valid(1));
     assert(!kl_hand_tracking_read(0, NULL, NULL, NULL, 100));
     kl_hand_tracking_publish(0, bones, curl, splay, 100);
     assert(kl_hand_tracking_read(0, out, co, so, 100.125));
@@ -45,6 +50,7 @@ int main(void) {
     assert(!kl_hand_tracking_read(-1, NULL, NULL, NULL, 100));
     kl_hand_tracking_publish(1, bones, curl, splay, 100);
     kl_hand_tracking_clear(0);
+    assert(kl_hand_tracking_palm_valid(0)); // Missing fingers do not lose the palm.
     assert(!kl_hand_tracking_read(0, NULL, NULL, NULL, 100));
     assert(kl_hand_tracking_read(1, NULL, NULL, NULL, 100));
     bones[6] = NAN;
@@ -53,9 +59,12 @@ int main(void) {
     sample(bones, curl, splay, 0.25f);
     kl_hand_tracking_publish(0, bones, curl, splay, 100);
     kl_hand_tracking_set_enabled(1); // Reasserting mode retains current data.
+    assert(kl_hand_tracking_generation() == generation && kl_hand_tracking_palm_valid(0));
     assert(kl_hand_tracking_read(0, NULL, NULL, NULL, 100));
     kl_hand_tracking_set_enabled(0);
     kl_hand_tracking_set_enabled(1);
+    assert(kl_hand_tracking_generation() == generation + 2);
+    assert(!kl_hand_tracking_palm_valid(0) && !kl_hand_tracking_palm_valid(1));
     assert(!kl_hand_tracking_read(0, NULL, NULL, NULL, 100));
 
     // Concurrent publishers cannot tear a snapshot across bones and summary.

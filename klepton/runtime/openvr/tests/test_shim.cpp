@@ -582,7 +582,7 @@ static void test_input() {
         CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live, 31) == vr::VRInputError_None);
         CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithController, back, 31) == vr::VRInputError_None);
         CHECK(memcmp(live, back, sizeof live) == 0);
-        for (int b = 0; b < 31; b++) {
+        for (int b = 2; b < 26; b++) {
             const float *xf = tracked.bones + 7 * b;
             CHECK(live[b].position.v[0] == xf[0] && live[b].position.v[1] == xf[1] && live[b].position.v[2] == xf[2]);
             CHECK(live[b].orientation.x == xf[3] && live[b].orientation.y == xf[4] && live[b].orientation.z == xf[5] && live[b].orientation.w == xf[6]);
@@ -592,7 +592,7 @@ static void test_input() {
         CHECK(memcmp(sum.flFingerSplay, tracked.splay, sizeof tracked.splay) == 0);
         CHECK(in->GetSkeletalBoneData(action, vr::VRSkeletalTransformSpace_Model, vr::VRSkeletalMotionRange_WithoutController, model, 31) == vr::VRInputError_None);
         // Auxiliary bones are children of root in Valve's hierarchy.
-        NEAR(model[27].position.v[0], tracked.bones[0] + tracked.bones[27 * 7]);
+        NEAR(model[27].position.v[0], live[27].position.v[0]);
         CHECK(in->GetSkeletalBoneDataCompressed(action, vr::VRSkeletalMotionRange_WithController, packed, sizeof packed, &need) == vr::VRInputError_None);
         CHECK(in->DecompressSkeletalBoneData(packed, need, vr::VRSkeletalTransformSpace_Parent, back, 31) == vr::VRInputError_None);
         CHECK(memcmp(back, live, sizeof back) == 0);
@@ -666,15 +666,12 @@ static void test_input() {
         klvr_null.skeleton[h] = saved_skeleton;
     }
 
-    // Bare-hand poses already use the skeleton root; no Touch raw/grip/tip
-    // offsets may move either action poses or the tracked device pose.
+    // Raw action and tracked-device poses share the canonical skeleton root.
     CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pd, sizeof pd, rh) == vr::VRInputError_None);
-    NEAR(pd.pose.mDeviceToAbsoluteTracking.m[0][3], 0.2f);
-    NEAR(pd.pose.mDeviceToAbsoluteTracking.m[1][3], 1.2f);
-    NEAR(pd.pose.mDeviceToAbsoluteTracking.m[2][3], -0.3f);
     vr::TrackedDevicePose_t tracked_poses[3];
     iface<vr::IVRSystem>(vr::IVRSystem_Version)->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, tracked_poses, 3);
-    NEAR(tracked_poses[2].mDeviceToAbsoluteTracking.m[2][3], -0.3f);
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++)
+        NEAR(tracked_poses[2].mDeviceToAbsoluteTracking.m[i][j], pd.pose.mDeviceToAbsoluteTracking.m[i][j]);
 
     // A lost/stale hand is inactive even if the controller seam still has a
     // connected device with grip held. The other hand remains independent.
@@ -689,7 +686,7 @@ static void test_input() {
     CHECK(in->GetSkeletalBoneDataCompressed(skr, vr::VRSkeletalMotionRange_WithController, packed, sizeof packed, &need) == vr::VRInputError_NoData);
     CHECK(in->GetSkeletalTrackingLevel(skr, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
     CHECK(in->GetSkeletalTrackingLevel(skl, &level) == vr::VRInputError_None && level == vr::VRSkeletalTracking_Full);
-    CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pd, sizeof pd, rh) == vr::VRInputError_None && !pd.bActive);
+    CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pd, sizeof pd, rh) == vr::VRInputError_None && pd.bActive);
     // Switching back retains the original controller-estimated behavior.
     klvr_null.hand_tracking_enabled = 0;
     klvr_null.fixed_now = 0;
@@ -896,88 +893,153 @@ static void test_fades() {
     klvr_null.fixed_now = 0;
 }
 
-static void test_anatomical_references() {
+static void test_canonical_native_hands() {
     auto *in = iface<vr::IVRInput>(vr::IVRInput_Version);
-    vr::VRActionHandle_t skeleton[2], pose;
+    auto *comp = iface<vr::IVRCompositor>(vr::IVRCompositor_Version);
+    vr::VRActionHandle_t skeleton[2], pose, tip, grip;
     in->GetActionHandle("/actions/default/in/SkeletonLeft", &skeleton[0]);
     in->GetActionHandle("/actions/default/in/SkeletonRight", &skeleton[1]);
     in->GetActionHandle("/actions/default/in/HandPose", &pose);
+    in->GetActionHandle("/actions/default/in/TipPose", &tip);
+    in->GetActionHandle("/actions/default/in/GripPose", &grip);
     const auto saved = klvr_null;
     connect_controllers();
     klvr_null.fixed_now = 300;
     using V = std::array<float, 3>;
-    auto sub = [](V a, V b) -> V { return {a[0]-b[0], a[1]-b[1], a[2]-b[2]}; };
-    auto dot = [](V a, V b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
-    auto unit = [&](V v) -> V { float n = std::sqrt(dot(v, v)); return {v[0]/n, v[1]/n, v[2]/n}; };
-    auto cross = [](V a, V b) -> V { return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]}; };
-    auto position = [](const vr::VRBoneTransform_t &b) -> V { return {b.position.v[0], b.position.v[1], b.position.v[2]}; };
     auto rotate = [](vr::HmdQuaternionf_t q, V v) -> V {
         float tx=2*(q.y*v[2]-q.z*v[1]), ty=2*(q.z*v[0]-q.x*v[2]), tz=2*(q.x*v[1]-q.y*v[0]);
         return {v[0]+q.w*tx+q.y*tz-q.z*ty, v[1]+q.w*ty+q.z*tx-q.x*tz, v[2]+q.w*tz+q.x*ty-q.y*tx};
     };
-    for (int h = 0; h < 2; h++) {
-        // Save the controller outputs through the public API, then calculate
-        // the expected anatomical coordinates by projecting onto palm axes.
+    const int parent[31] = {-1,0,1,2,3,4,1,6,7,8,9,1,11,12,13,14,1,16,17,18,19,1,21,22,23,24,0,0,0,0,0};
+    auto original_model = [&](const float *bones, int b, V v, bool point) -> V {
+        for (; b >= 0; b = parent[b]) {
+            const float *q = bones + b*7;
+            v = rotate({q[6],q[3],q[4],q[5]}, v);
+            if (point) for (int i=0;i<3;i++) v[i] += q[i];
+        }
+        return v;
+    };
+    auto matrix_vector = [](const vr::HmdMatrix34_t &m, V v, bool point) -> V {
+        V out{};
+        for (int i=0;i<3;i++) out[i] = m.m[i][0]*v[0]+m.m[i][1]*v[1]+m.m[i][2]*v[2]+(point?m.m[i][3]:0);
+        return out;
+    };
+    for (int h=0;h<2;h++) {
         klvr_null.hand_tracking_enabled = 0;
-        vr::VRBoneTransform_t original[4][31], original_model[4][31];
-        for (int k = 0; k < 4; k++) {
-            const auto which = vr::EVRSkeletalReferencePose(k);
-            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent, which, original[k], 31) == vr::VRInputError_None);
-            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Model, which, original_model[k], 31) == vr::VRInputError_None);
-        }
-        const auto &open = original_model[vr::VRSkeletalReferencePose_OpenHand];
-        V z = unit(sub(position(open[1]), position(open[12])));
-        V across = sub(position(open[h ? 22 : 7]), position(open[h ? 7 : 22]));
-        V y = unit(cross(z, across)), x = unit(cross(y, z));
-        V basis[3] = {x, y, z}, palm;
-        for (int i = 0; i < 3; i++) palm[i] = (open[11].position.v[i] + open[12].position.v[i]) * 0.5f;
-
+        vr::VRBoneTransform_t refs[4][31];
+        for (int k=0;k<4;k++) CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent,
+            vr::EVRSkeletalReferencePose(k), refs[k], 31) == vr::VRInputError_None);
         klvr_null.hand_tracking_enabled = 1;
-        auto &tracked = klvr_null.skeleton[h];
-        tracked.valid = 1; tracked.time = 300;
-        for (int b = 0; b < 31; b++) {
-            float *v = tracked.bones + 7*b;
-            v[0] = 0.001f*b; v[1] = 0.002f*b; v[2] = -0.003f*b;
-            v[3] = 0; v[4] = 0; v[5] = 0; v[6] = 1;
+        auto &sample = klvr_null.skeleton[h];
+        sample.valid=1; sample.time=klvr_null.fixed_now;
+        for (int b=0;b<31;b++) {
+            float *v=sample.bones+b*7;
+            v[0]=0.001f*b; v[1]=0.002f*b; v[2]=-0.003f*b;
+            v[3]=0; v[4]=0; v[5]=0; v[6]=1;
         }
-        tracked.bones[7*7+3] = 0.6f; tracked.bones[7*7+6] = 0.8f;
-        vr::VRBoneTransform_t live_before[31], live_after[31];
-        vr::InputPoseActionData_t pose_before{}, pose_after{};
-        const auto origin = vr::VRInputValueHandle_t(h + 1);
-        CHECK(in->GetSkeletalBoneData(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live_before, 31) == vr::VRInputError_None);
-        CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pose_before, sizeof pose_before, origin) == vr::VRInputError_None);
-        for (int k = 0; k < 4; k++) {
-            vr::VRBoneTransform_t local[31], model[31];
-            const auto which = vr::EVRSkeletalReferencePose(k);
-            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent, which, local, 31) == vr::VRInputError_None);
-            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Model, which, model, 31) == vr::VRInputError_None);
-            NEAR(local[0].orientation.w, 1); NEAR(local[0].orientation.x, 0); NEAR(local[0].orientation.y, 0); NEAR(local[0].orientation.z, 0);
-            for (int i = 0; i < 3; i++) NEAR(local[0].position.v[i], 0);
-            // Only root children (wrist and auxiliary bones) may change.
-            for (int b = 2; b <= 25; b++) CHECK(memcmp(&local[b], &original[k][b], sizeof local[b]) == 0);
-            for (int b = 1; b < 31; b++) {
-                V relative = sub(position(original_model[k][b]), palm);
-                for (int i = 0; i < 3; i++) NEAR(model[b].position.v[i], dot(basis[i], relative));
-                for (int axis = 0; axis < 3; axis++) {
-                    V unit_axis = {}; unit_axis[axis] = 1;
-                    V old_axis = rotate(original_model[k][b].orientation, unit_axis);
-                    V new_axis = rotate(model[b].orientation, unit_axis);
-                    for (int i = 0; i < 3; i++) NEAR(new_axis[i], dot(basis[i], old_axis));
-                }
+        sample.bones[7+3]=0.6f; sample.bones[7+6]=0.8f;
+        sample.bones[7*7+4]=0.6f; sample.bones[7*7+6]=0.8f;
+        klvr_null.hand[h].pose = {{h?0.4f:-0.3f, 1.2f, -0.5f}, {0,0.6f,0,0.8f}};
+        const auto palm = klvr_null.hand[h].pose;
+        const auto original = sample;
+        const auto origin = vr::VRInputValueHandle_t(h+1);
+        vr::TrackedDevicePose_t devices[3];
+        CHECK(comp->WaitGetPoses(devices, 3, nullptr, 0) == vr::VRCompositorError_None);
+        vr::InputPoseActionData_t raw{}, skeletal{}, anatomical{};
+        CHECK(in->GetPoseActionDataForNextFrame(pose, vr::TrackingUniverseStanding, &raw, sizeof raw, origin) == vr::VRInputError_None);
+        CHECK(in->GetPoseActionDataForNextFrame(skeleton[h], vr::TrackingUniverseStanding, &skeletal, sizeof skeletal, 0) == vr::VRInputError_None);
+        CHECK(!memcmp(&raw.pose.mDeviceToAbsoluteTracking, &skeletal.pose.mDeviceToAbsoluteTracking, sizeof(vr::HmdMatrix34_t)));
+        CHECK(!memcmp(&raw.pose.mDeviceToAbsoluteTracking, &devices[h+1].mDeviceToAbsoluteTracking, sizeof(vr::HmdMatrix34_t)));
+        for (auto a : {tip, grip}) {
+            CHECK(in->GetPoseActionDataForNextFrame(a, vr::TrackingUniverseStanding, &anatomical, sizeof anatomical, origin) == vr::VRInputError_None);
+            for (int i=0;i<3;i++) NEAR(anatomical.pose.mDeviceToAbsoluteTracking.m[i][3], palm.p[i]);
+            for (int axis=0;axis<3;axis++) {
+                V v{}; v[axis]=1;
+                V expected=rotate({palm.q[3],palm.q[0],palm.q[1],palm.q[2]},v);
+                for(int i=0;i<3;i++) NEAR(anatomical.pose.mDeviceToAbsoluteTracking.m[i][axis],expected[i]);
             }
         }
-        CHECK(in->GetSkeletalBoneData(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, live_after, 31) == vr::VRInputError_None);
-        CHECK(memcmp(live_before, live_after, sizeof live_before) == 0);
-        CHECK(in->GetPoseActionDataRelativeToNow(pose, vr::TrackingUniverseStanding, 0, &pose_after, sizeof pose_after, origin) == vr::VRInputError_None);
-        CHECK(memcmp(&pose_before.pose.mDeviceToAbsoluteTracking, &pose_after.pose.mDeviceToAbsoluteTracking, sizeof pose_before.pose.mDeviceToAbsoluteTracking) == 0);
-        klvr_null.hand_tracking_enabled = 0;
-        for (int k = 0; k < 4; k++) {
-            vr::VRBoneTransform_t controller[31];
-            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::EVRSkeletalReferencePose(k), controller, 31) == vr::VRInputError_None);
-            CHECK(memcmp(controller, original[k], sizeof controller) == 0);
+        vr::VRBoneTransform_t local[31], model[31];
+        CHECK(in->GetSkeletalBoneData(skeleton[h], vr::VRSkeletalTransformSpace_Parent, vr::VRSkeletalMotionRange_WithoutController, local,31)==vr::VRInputError_None);
+        CHECK(in->GetSkeletalBoneData(skeleton[h], vr::VRSkeletalTransformSpace_Model, vr::VRSkeletalMotionRange_WithoutController, model,31)==vr::VRInputError_None);
+        CHECK(!memcmp(&local[1], &refs[vr::VRSkeletalReferencePose_OpenHand][1], sizeof local[1]));
+        NEAR(local[0].orientation.w,1);
+        for(int i=0;i<3;i++) NEAR(local[0].position.v[i],0);
+        for(int b=2;b<26;b++) {
+            const float *v=original.bones+b*7;
+            for(int i=0;i<3;i++) NEAR(local[b].position.v[i],v[i]);
+            NEAR(local[b].orientation.x,v[3]); NEAR(local[b].orientation.y,v[4]);
+            NEAR(local[b].orientation.z,v[5]); NEAR(local[b].orientation.w,v[6]);
         }
+        // Every measured world joint survives the rigid rebase, including
+        // auxiliary IK targets. Check orientation with three independent axes.
+        for(int b=1;b<31;b++) for(int axis=-1;axis<3;axis++) {
+            const bool point=axis<0; V v{}; if(!point) v[axis]=1;
+            V expected=original_model(original.bones,b,v,point);
+            expected=rotate({palm.q[3],palm.q[0],palm.q[1],palm.q[2]},expected);
+            if(point) for(int i=0;i<3;i++) expected[i]+=palm.p[i];
+            V got=rotate(model[b].orientation,v);
+            if(point) for(int i=0;i<3;i++) got[i]+=model[b].position.v[i];
+            got=matrix_vector(raw.pose.mDeviceToAbsoluteTracking,got,point);
+            for(int i=0;i<3;i++) NEAR(got[i],expected[i]);
+        }
+        for(int k=0;k<4;k++) {
+            vr::VRBoneTransform_t reference[31];
+            CHECK(in->GetSkeletalReferenceTransforms(skeleton[h],vr::VRSkeletalTransformSpace_Parent,
+                vr::EVRSkeletalReferencePose(k),reference,31)==vr::VRInputError_None);
+            CHECK(!memcmp(reference,refs[k],sizeof reference));
+        }
+        // A new publisher sample cannot mix a new wrist basis with this
+        // frame's bones or pose. It becomes visible at the next display frame.
+        sample.bones[7]+=0.1f; klvr_null.hand[h].pose.p[0]+=0.2f;
+        vr::VRBoneTransform_t repeated[31]; vr::InputPoseActionData_t repeated_pose{};
+        in->GetSkeletalBoneData(skeleton[h],vr::VRSkeletalTransformSpace_Parent,vr::VRSkeletalMotionRange_WithoutController,repeated,31);
+        in->GetPoseActionDataForNextFrame(pose,vr::TrackingUniverseStanding,&repeated_pose,sizeof repeated_pose,origin);
+        CHECK(!memcmp(local,repeated,sizeof local));
+        CHECK(!memcmp(&raw.pose.mDeviceToAbsoluteTracking,&repeated_pose.pose.mDeviceToAbsoluteTracking,sizeof(vr::HmdMatrix34_t)));
+        klvr_null.hand[h].valid=0;
+        in->GetPoseActionDataForNextFrame(pose,vr::TrackingUniverseStanding,&repeated_pose,sizeof repeated_pose,origin);
+        CHECK(!repeated_pose.pose.bPoseIsValid);
+        klvr_null.hand[h].valid=1;
+        sample.valid=0;
+        CHECK(in->GetSkeletalBoneData(skeleton[h],vr::VRSkeletalTransformSpace_Parent,vr::VRSkeletalMotionRange_WithoutController,repeated,31)==vr::VRInputError_NoData);
+        // New frame with no fingers retains last S, but follows the new palm.
+        klvr_null.fixed_now+=0.02;
+        comp->WaitGetPoses(devices,3,nullptr,0);
+        in->GetPoseActionDataForNextFrame(pose,vr::TrackingUniverseStanding,&repeated_pose,sizeof repeated_pose,origin);
+        CHECK(repeated_pose.pose.bPoseIsValid && repeated_pose.bActive);
+        NEAR(repeated_pose.pose.mDeviceToAbsoluteTracking.m[0][3],raw.pose.mDeviceToAbsoluteTracking.m[0][3]+0.2f);
+        // A stalled frame never mixes a newly published wrist with its old
+        // raw placement. Keep last S/palm motion, withhold skeletal data.
+        sample.valid=1; sample.time=klvr_null.fixed_now+0.2;
+        klvr_null.fixed_now+=0.2;
+        CHECK(in->GetSkeletalBoneData(skeleton[h],vr::VRSkeletalTransformSpace_Parent,vr::VRSkeletalMotionRange_WithoutController,repeated,31)==vr::VRInputError_NoData);
+        // Off/on is a new mode epoch even if no frame observed the off state.
+        // With no first sample, raw*referencePalm must equal the live palm.
+        sample.valid=0; klvr_null.hand_tracking_generation+=2;
+        in->GetPoseActionDataForNextFrame(pose,vr::TrackingUniverseStanding,&repeated_pose,sizeof repeated_pose,origin);
+        CHECK(repeated_pose.pose.bPoseIsValid && repeated_pose.bActive);
+        vr::VRBoneTransform_t reference_model[31];
+        in->GetSkeletalReferenceTransforms(skeleton[h],vr::VRSkeletalTransformSpace_Model,vr::VRSkeletalReferencePose_OpenHand,reference_model,31);
+        auto pos=[](const vr::VRBoneTransform_t &b)->V{return {b.position.v[0],b.position.v[1],b.position.v[2]};};
+        auto sub=[](V a,V b)->V{return {a[0]-b[0],a[1]-b[1],a[2]-b[2]};};
+        auto cross=[](V a,V b)->V{return {a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};};
+        auto unit=[](V a)->V{float n=std::sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);return {a[0]/n,a[1]/n,a[2]/n};};
+        V z=unit(sub(pos(reference_model[1]),pos(reference_model[12])));
+        V y=unit(cross(z,sub(pos(reference_model[h?22:7]),pos(reference_model[h?7:22]))));
+        V basis[3]={unit(cross(y,z)),y,z}, ref_palm;
+        for(int i=0;i<3;i++) ref_palm[i]=(reference_model[11].position.v[i]+reference_model[12].position.v[i])*0.5f;
+        V world_palm=matrix_vector(repeated_pose.pose.mDeviceToAbsoluteTracking,ref_palm,true);
+        for(int i=0;i<3;i++) NEAR(world_palm[i],klvr_null.hand[h].pose.p[i]);
+        for(int axis=0;axis<3;axis++) {
+            V v{};v[axis]=1;
+            V want=rotate({palm.q[3],palm.q[0],palm.q[1],palm.q[2]},v);
+            V got=matrix_vector(repeated_pose.pose.mDeviceToAbsoluteTracking,basis[axis],false);
+            for(int i=0;i<3;i++) NEAR(got[i],want[i]);
+        }
+        klvr_null.fixed_now+=1; // No cached frame crosses into the other case.
     }
-    klvr_null = saved;
+    klvr_null=saved;
 }
 
 int main() {
@@ -986,7 +1048,7 @@ int main() {
     test_abi_thunk();
     test_compositor();
     test_input();
-    test_anatomical_references();
+    test_canonical_native_hands();
     test_stubs();
     test_private();
     test_overlay();

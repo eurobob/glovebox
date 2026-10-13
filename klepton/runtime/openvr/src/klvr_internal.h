@@ -124,6 +124,19 @@ struct Frame {
 Frame current_frame();
 void  set_current_frame(const Frame &f);
 
+// One coherent native-hand sample: canonical SteamVR bones and their raw
+// placement relative to the frontend's anatomical palm. Poses and bones use
+// the same sample throughout a display frame.
+struct NativeHand {
+    klvr_tracked palm{};
+    Pose raw_from_palm = {{0, 0, 0}, {0, 0, 0, 1}};
+    bool skeleton_valid = false;
+    vr::VRBoneTransform_t bones[31]{};
+    float curl[5]{}, splay[4]{};
+};
+void native_hands_frame(const Frame &f);
+NativeHand native_hand(int hand, double time);
+
 // ---- cross-file hooks -----------------------------------------------------
 // klvr_vk_submit.cpp. `fence`/`device`, if given, receive the fence the copy
 // signals and the device it belongs to.

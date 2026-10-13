@@ -94,6 +94,7 @@ void   klvr_plat_controller(int hand, klvr_controller *out);
 // Native articulated hands are a separate mode from controller-estimated
 // skeletons. When enabled but stale/lost, callers must not synthesize curls.
 int    klvr_plat_hand_tracking_enabled(void);
+uint64_t klvr_plat_hand_tracking_generation(void);
 // A fresh snapshot: 31 parent-space Valve bones (xyz + quaternion xyzw),
 // five finger curls and four adjacent-finger splays. Outputs may be NULL.
 int    klvr_plat_skeleton(int hand, float *bones31x7, float *curl5, float *splay4);

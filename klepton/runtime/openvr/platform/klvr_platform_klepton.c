@@ -30,6 +30,8 @@
 #define KLVR_HAND_WEAK __attribute__((weak))
 #endif
 extern int kl_hand_tracking_enabled(void) KLVR_HAND_WEAK;
+extern uint64_t kl_hand_tracking_generation(void) KLVR_HAND_WEAK;
+extern int kl_hand_tracking_palm_valid(int) KLVR_HAND_WEAK;
 extern int kl_hand_tracking_read(int, float *, float *, float *, double) KLVR_HAND_WEAK;
 
 // ---- frame pacing ---------------------------------------------------------
@@ -102,6 +104,10 @@ double klvr_plat_now(void) {
 
 int klvr_plat_hand_tracking_enabled(void) {
     return kl_hand_tracking_enabled && kl_hand_tracking_enabled();
+}
+
+uint64_t klvr_plat_hand_tracking_generation(void) {
+    return kl_hand_tracking_generation ? kl_hand_tracking_generation() : 0;
 }
 
 int klvr_plat_skeleton(int hand, float *bones, float *curl, float *splay) {
@@ -561,7 +567,9 @@ static double ctrl_grace(void) {
 void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
     memset(out, 0, sizeof *out);
     int tracked_hand = klvr_plat_hand_tracking_enabled();
-    if (tracked_hand && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) return;
+    // Palm and finger availability are independent. A missing/occluded
+    // skeleton must not discard a valid frontend palm pose.
+    if (tracked_hand && kl_hand_tracking_palm_valid && !kl_hand_tracking_palm_valid(hand)) return;
     if (host()) {
         // Waist height, a forearm in front of the fixed head, pointing ahead.
         if (!host_hands()) return;
@@ -633,7 +641,9 @@ void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
 void klvr_plat_controller(int hand, klvr_controller *out) {
     memset(out, 0, sizeof *out);
     int tracked_hand = klvr_plat_hand_tracking_enabled();
-    if (tracked_hand && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) return;
+    // The frontend validates each gesture separately. Keep its input while
+    // unrelated finger joints are unavailable; skeletal APIs report NoData.
+    if (tracked_hand && kl_hand_tracking_palm_valid && !kl_hand_tracking_palm_valid(hand)) return;
     if (host()) { out->connected = host_hands(); return; }
     uint32_t b = 0, t = 0;
     float it = 0, ht = 0, sx = 0, sy = 0;

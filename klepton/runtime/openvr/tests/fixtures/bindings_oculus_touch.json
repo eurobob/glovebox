@@ -19,7 +19,11 @@
       ],
       "poses": [
         { "output": "/actions/default/in/HandPose", "path": "/user/hand/left/pose/raw" },
-        { "output": "/actions/default/in/HandPose", "path": "/user/hand/right/pose/raw" }
+        { "output": "/actions/default/in/HandPose", "path": "/user/hand/right/pose/raw" },
+        { "output": "/actions/default/in/TipPose", "path": "/user/hand/left/pose/tip" },
+        { "output": "/actions/default/in/TipPose", "path": "/user/hand/right/pose/tip" },
+        { "output": "/actions/default/in/GripPose", "path": "/user/hand/left/pose/grip" },
+        { "output": "/actions/default/in/GripPose", "path": "/user/hand/right/pose/grip" }
       ],
       "haptics": [
         { "output": "/actions/default/out/Haptic", "path": "/user/hand/left/output/haptic" },

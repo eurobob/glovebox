@@ -90,12 +90,10 @@ void skel_reference(int hand, vr::EVRSkeletalReferencePose which, vr::VRBoneTran
     for (int i = 0; i < kBoneCount; i++) out[i] = bone(t[i]);
 }
 
-void skel_reference_anatomical(int hand, vr::EVRSkeletalReferencePose which,
-                               vr::VRBoneTransform_t out[kBoneCount]) {
-    // Use one frame from the canonical open-hand geometry for every reference
-    // variant. Deriving it separately from a fist would erase articulation.
-    // This matches KleptonTrackedHand's palm construction without changing
-    // its already-usable raw/aim pose or any measured live joint transform.
+static const Pose &fallback_raw_from_palm(int hand) {
+    // Before any live fingers arrive, place the canonical skeleton by the
+    // same anatomical palm geometry used by KleptonTrackedHand. References
+    // remain Valve's unmodified data; this transform affects placement only.
     static const std::array<Pose, 2> anatomical_from_reference = [] {
         auto cross = [](Vec3 a, Vec3 b) -> Vec3 {
             return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -117,15 +115,102 @@ void skel_reference_anatomical(int hand, vr::EVRSkeletalReferencePose which,
         }
         return result;
     }();
-    hand = hand ? 1 : 0;
-    skel_reference(hand, which, out);
-    // Root is still identity. Only its direct children change coordinates;
-    // all wrist/finger-relative articulation remains Valve's original data.
-    for (int i = 1; i < kBoneCount; i++) {
-        if (kParent[i] != 0) continue;
-        Pose p = pmul(anatomical_from_reference[hand], {p_of(out[i]), q_of(out[i])});
-        out[i] = make(p.p, p.q);
+    return anatomical_from_reference[hand ? 1 : 0];
+}
+
+static std::mutex g_native_mu;
+static NativeHand g_native_hand[2];
+static Pose g_last_raw_from_palm[2];
+static bool g_have_raw[2]{};
+static uint32_t g_native_frame;
+static double g_native_time, g_native_captured;
+static uint64_t g_native_generation;
+
+static void check_native_generation() {
+    const uint64_t generation = klvr_plat_hand_tracking_generation();
+    if (generation == g_native_generation) return;
+    g_native_generation = generation;
+    g_native_frame = 0;
+    g_have_raw[0] = g_have_raw[1] = false;
+}
+
+// Called with g_native_mu held. The bridge returns one atomic set of bones
+// and summaries. S and the rebased bones are always derived from that set.
+static NativeHand sample_native_hand(int hand, double time) {
+    NativeHand result;
+    klvr_plat_hand(hand, time, &result.palm);
+    result.raw_from_palm = g_have_raw[hand] ? g_last_raw_from_palm[hand] : fallback_raw_from_palm(hand);
+    float data[kBoneCount * 7];
+    result.skeleton_valid = klvr_plat_skeleton(hand, data, result.curl, result.splay);
+    if (!result.skeleton_valid) return result;
+    for (int i = 0; i < kBoneCount; i++) result.bones[i] = bone(data + i * 7);
+    vr::VRBoneTransform_t reference[kBoneCount];
+    skel_reference(hand, vr::VRSkeletalReferencePose_OpenHand, reference);
+    const Pose wrist = {p_of(result.bones[1]), q_of(result.bones[1])};
+    const Pose canonical = {p_of(reference[1]), q_of(reference[1])};
+    // P' = P*S, W' = R: P'*R = P*W. Every root-parented auxiliary
+    // gets S^-1; finger-relative joints and measured world poses are kept.
+    result.raw_from_palm = pmul(wrist, pinv(canonical));
+    result.bones[0] = make({0, 0, 0}, {0, 0, 0, 1});
+    result.bones[1] = reference[1];
+    const Pose inverse = pinv(result.raw_from_palm);
+    for (int i = 26; i < kBoneCount; i++) {
+        const Pose local = pmul(inverse, {p_of(result.bones[i]), q_of(result.bones[i])});
+        result.bones[i] = make(local.p, local.q);
     }
+    g_last_raw_from_palm[hand] = result.raw_from_palm;
+    g_have_raw[hand] = true;
+    return result;
+}
+
+void native_hands_frame(const Frame &f) {
+    std::lock_guard<std::mutex> lock(g_native_mu);
+    check_native_generation();
+    g_native_frame = 0;
+    if (!klvr_plat_hand_tracking_enabled()) {
+        g_have_raw[0] = g_have_raw[1] = false;
+        return;
+    }
+    for (int hand = 0; hand < 2; hand++) g_native_hand[hand] = sample_native_hand(hand, f.display_time);
+    g_native_frame = f.id;
+    g_native_time = f.display_time;
+    g_native_captured = klvr_plat_now();
+}
+
+NativeHand native_hand(int hand, double time) {
+    std::lock_guard<std::mutex> lock(g_native_mu);
+    check_native_generation();
+    const double age = klvr_plat_now() - g_native_captured;
+    if (!g_native_frame) return sample_native_hand(hand, time);
+    NativeHand result = g_native_hand[hand];
+    // A latch holds coordinates, never availability: real palm loss and
+    // expired/cleared fingers take effect even between display frames.
+    klvr_tracked current{};
+    klvr_plat_hand(hand, time, &current);
+    if (age < 0 || age > 0.15) {
+        // A stalled render frame must not resample a different S separately
+        // for each API. Follow the palm with the last placement, withholding
+        // articulation until a fresh frame latches both together again.
+        result.palm = current;
+        result.skeleton_valid = false;
+        return result;
+    }
+    result.palm.valid = result.palm.valid && current.valid;
+    result.skeleton_valid = result.skeleton_valid && klvr_plat_skeleton(hand, nullptr, nullptr, nullptr);
+    // Keep articulation/S pinned, but honor OpenVR's requested prediction
+    // instant using the same bounded rigid motion as the platform adapter.
+    if (result.palm.valid && result.palm.motion_known) {
+        const float dt = float(std::fmax(-0.05, std::fmin(0.05, time - g_native_time)));
+        for (int i = 0; i < 3; i++) result.palm.pose.p[i] += result.palm.vel[i] * dt;
+        const Vec3 angular = {result.palm.ang[0], result.palm.ang[1], result.palm.ang[2]};
+        const float speed = std::sqrt(angular.x*angular.x + angular.y*angular.y + angular.z*angular.z);
+        if (speed > 1e-6f) {
+            Quat q = qmul(qfrom_axis_angle(vscale(angular, 1 / speed), speed * dt), to_pose(result.palm.pose).q);
+            result.palm.pose.q[0] = q.x; result.palm.pose.q[1] = q.y;
+            result.palm.pose.q[2] = q.z; result.palm.pose.q[3] = q.w;
+        }
+    }
+    return result;
 }
 
 void skel_pose(int hand, const float curl[5], vr::EVRSkeletalMotionRange range, vr::VRBoneTransform_t out[kBoneCount]) {

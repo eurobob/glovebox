@@ -9,9 +9,13 @@ dropouts; temporary availability still uses bActive/NoData. It also records at m
 per process, covering the actual placement poses and reference/live wrist transforms Alyx requests.
 That capability fix did not resolve the visible alignment. Its trace confirmed that Alyx reads raw hand-pose
 actions and OpenHand reference transforms alongside live finger bones. With real palms down, the rendered
-palms still faced inward. Build **1013.2.2** tests reference transforms expressed in the same anatomical palm
-frame as the native live skeleton, preserving the existing raw aiming pose and live finger data. This is a
-targeted compatibility experiment; its visual alignment still needs a headset playtest.
+palms still faced inward. Build **1013.2.2** changed reference transforms to the anatomical palm frame.
+Its playtest improved menu placement but still showed incorrect position and rotation in gameplay.
+
+Build **1013.4.1** replaces that reference-only experiment. Valve's original reference skeleton is restored;
+the raw placement pose and live skeleton are rebased together so the canonical wrist lands at the measured
+wrist. Finger world transforms are preserved, and pose/bone queries share one display-frame sample. This
+changes the raw hand axes too; menu aiming and gameplay alignment both still need a headset playtest.
 Upstream Glovebox remains PS VR2 Sense-only. The launcher defaults to **Hands (Experimental)**,
 remembers your choice, and also offers **PS VR2 Sense** with its original two-controller requirement.
 Open **Controls** before Play for the in-headset reference.
@@ -39,7 +43,7 @@ two of middle/ring/little open to distinguish a button press from a fist grip.
 | Gesture | Controller input / intended action |
 | --- | --- |
 | Index finger + thumb | Trigger: select or fire |
-| Curl middle, ring and little fingers | Grip: hold or grab |
+| Curl at least two of middle, ring and little fingers | Grip: hold or grab |
 | Middle finger + thumb, then move that hand | Virtual stick: left moves; right turns, or pull back for teleport |
 | Hold middle finger + thumb still for 0.8 seconds | One click of that hand's virtual stick |
 | Ring finger + thumb | Left X / right A, held until release |
@@ -51,14 +55,17 @@ The game's bindings determine the resulting actions. A middle pinch sets the sti
 captures your horizontal viewing direction. Move your hand relative to that center: there is a
 1 cm dead zone, with full input at 8 cm. Releasing returns the stick to zero; re-pinching sets a new
 center. Moving outside the dead zone cancels the hold-to-click action for that pinch.
+Hands mode selects head-oriented continuous movement for the live player after spawn/load, matching this
+head-relative stick. It leaves the saved movement preference unchanged; Sense mode uses the game's settings.
 
 ## Tracking and limitations
 
 - All 25 wrist/finger joints from ARKit now feed Valve’s 31-bone skeleton, including its five helper bones.
   Individual joint bends and finger spread are independent of trigger/grip buttons. ARKit supplies inferred
   visual poses for occluded joints; those estimates are not used to press gesture buttons.
-- A palm-based pointer replaces the inherited Beat Saber/Sense pose correction. Bare hands bypass the
-  Sense pitch and Quest controller offsets. Adaptive filtering reduces stationary jitter and follows faster motion.
+- Bare hands bypass the inherited Sense pitch and Quest controller offsets. Raw/skeletal poses use a
+  placement transform derived from the measured wrist and Valve's canonical wrist; explicitly named
+  aim/grip/tip actions retain the anatomical palm pose. Adaptive filtering reduces stationary jitter and follows faster motion.
 - Index and middle pinches share the 39/44 mm thresholds and 20 ms debounce. A fingertip must lead the
   alternatives by 3 mm before activation; ambiguous pinches stay neutral. Once selected, a pinch keeps ownership.
 
@@ -66,13 +73,21 @@ center. Moving outside the dead zone cancels the hold-to-click action for that p
   index selection or freezes a tracked hand pose. After a control loses its own tracking, release
   that gesture before trying it again; a held gesture cannot reactivate on reacquisition.
 - Whole-hand tracking loss or compositor pause still releases all of that hand's controls and
-  zeros its motion velocity. Index selection needs the thumb and index tips, not a head sample or
+  invalidates its palm pose independently of finger availability. Native hand prediction uses
+  Compositor Services' `trackableAnchorTime`; the head keeps `presentationTime`.
+  Index selection needs the thumb and index tips, not a head sample or
   tracking of the other fingers. Heading is only needed to start a movement clutch.
 - Index pinch uses the legacy calibrated 39 mm press / 44 mm release thresholds, a 20 ms debounce,
   and a 60 ms minimum accepted press so the game's slower input poll can observe a quick click.
-  Losing index tracking cancels even that minimum press immediately.
+  An accepted trigger survives up to 60 ms of missing index/thumb joint data. Invalid data or whole-hand
+  loss releases it immediately; missing joints can never start a new press.
 - Only one pinch is recognized per hand at a time. Grip can combine with an index trigger, but
-  middle/ring/little pinches suppress grip. Relax the fingers before grabbing again.
+  an existing movement/button pinch suppresses grip. An active grip is protected from incidental
+  middle/ring/little contact with the thumb; those fingers must open before starting another gesture.
+  Two tracked curled fingers suffice for grip, and an accepted grip survives up to 120 ms of missing
+  curl data while the hand itself remains tracked. Opening the fingers releases immediately.
+- Missing finger skeleton data no longer disconnects a valid palm pose or drops its controller buttons.
+  Skeletal queries still report unavailable data, and placement keeps the last valid wrist calibration.
 - Trigger and grip are on/off controls, not analog pressure. Hands have no controller haptics.
   Tracking can fail when fingers overlap, leave view, or are hidden by the other hand or an object.
 - Menu, Y-on-release and stick-click gestures produce one short press per gesture, without repeating
@@ -155,4 +170,5 @@ required, and this repository does not include Valve's game binaries or download
 finger articulation, rigid-motion invariance and filtering. `sh tools/tests/run_hand_gestures.sh` exercises
 natural middle-pinches, arbitration, dropout and rearming. The OpenVR host suite (`make test` in
 `klepton/runtime/openvr`, with `VULKAN_INCLUDE` set) verifies actual skeletal API output, freshness and
-thread-safe snapshots. These checks do not prove visual alignment or comfort on the headset.
+thread-safe snapshots. `python3 tools/tests/test_hand_locomotion.py` verifies the composed gameinit hook
+and runs its Lua spawn callback. These checks do not prove visual alignment or comfort on the headset.

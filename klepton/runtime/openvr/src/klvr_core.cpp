@@ -281,9 +281,6 @@ static std::array<Pose, 2> make_raw_from_grip() {
 }
 
 const Pose &raw_from_grip(int hand) {
-    // Native skeletons and grip poses already share the anatomical palm root.
-    static const Pose identity = { { 0, 0, 0 }, { 0, 0, 0, 1 } };
-    if (klvr_plat_hand_tracking_enabled()) return identity;
     static const std::array<Pose, 2> p = make_raw_from_grip();
     return p[hand ? 1 : 0];
 }
@@ -309,8 +306,13 @@ void device_poses(double t, vr::ETrackingUniverseOrigin u,
         klvr_plat_controller(hand, &c);
         if (!c.connected) continue;
         klvr_tracked g{};
-        klvr_plat_hand(hand, t, &g);
-        fill_pose(&out[d], g, u, &raw_from_grip(hand));
+        if (klvr_plat_hand_tracking_enabled()) {
+            const auto native = native_hand(hand, t);
+            fill_pose(&out[d], native.palm, u, &native.raw_from_palm);
+        } else {
+            klvr_plat_hand(hand, t, &g);
+            fill_pose(&out[d], g, u, &raw_from_grip(hand));
+        }
     }
 }
 
@@ -342,7 +344,11 @@ bool pop_event(vr::VREvent_t *out, uint32_t size) {
 static std::mutex g_frame_mu;
 static Frame g_frame;
 Frame current_frame() { std::lock_guard<std::mutex> l(g_frame_mu); return g_frame; }
-void set_current_frame(const Frame &f) { std::lock_guard<std::mutex> l(g_frame_mu); g_frame = f; }
+void set_current_frame(const Frame &f) {
+    native_hands_frame(f);
+    std::lock_guard<std::mutex> l(g_frame_mu);
+    g_frame = f;
+}
 
 // ---- interface registry ---------------------------------------------------
 const InterfaceVersion *find_interface(const char *version) {

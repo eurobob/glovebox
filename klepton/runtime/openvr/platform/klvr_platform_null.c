@@ -42,22 +42,15 @@ void klvr_plat_head(double t, klvr_tracked *out) {
 
 void klvr_plat_hand(int hand, double t, klvr_tracked *out) {
     (void)t;
-    if (klvr_null.hand_tracking_enabled && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) {
-        memset(out, 0, sizeof *out);
-        return;
-    }
     *out = klvr_null.hand[hand & 1];
 }
 
 void klvr_plat_controller(int hand, klvr_controller *out) {
-    if (klvr_null.hand_tracking_enabled && !klvr_plat_skeleton(hand, NULL, NULL, NULL)) {
-        memset(out, 0, sizeof *out);
-        return;
-    }
     *out = klvr_null.ctl[hand & 1];
 }
 
 int klvr_plat_hand_tracking_enabled(void) { return klvr_null.hand_tracking_enabled; }
+uint64_t klvr_plat_hand_tracking_generation(void) { return klvr_null.hand_tracking_generation; }
 int klvr_plat_skeleton(int hand, float *bones, float *curl, float *splay) {
     if (bones) memset(bones, 0, 31 * 7 * sizeof(float));
     if (curl) memset(curl, 0, 5 * sizeof(float));

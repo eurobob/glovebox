@@ -10,10 +10,13 @@ struct HandGestureTests {
         partialTracking()
         headingAvailability()
         quickIndexPress()
+        indexOcclusionGrace()
         naturalMiddleGeometry()
         adjacentFingerArbitration()
         exclusivityAndHysteresis()
         gripAndTrigger()
+        gripEvidenceAndOcclusion()
+        heldGripOwnsCurledFingers()
         navigationDoesNotGrab()
         trackingLossAndReacquisition()
         faceButtonsAndMenu()
@@ -89,9 +92,11 @@ struct HandGestureTests {
         expect(gestures.update(sample: occluded, at: 0.14, hand: 0).trigger == 1,
                "Missing pinky or curl cannot reset an active index pinch")
         occluded.indexPinch = nil
-        expect(neutral(gestures.update(sample: occluded, at: 0.15, hand: 0)),
-               "Missing index immediately cancels even its minimum press pulse")
-        expect(neutral(gestures.update(sample: indexOnlyPinch, at: 0.16, hand: 0)),
+        expect(gestures.update(sample: occluded, at: 0.15, hand: 0).trigger == 1,
+               "A briefly occluded index preserves an already accepted press")
+        expect(neutral(gestures.update(sample: occluded, at: 0.201, hand: 0)),
+               "Missing index cancels after at most 60 ms without tracked evidence")
+        expect(neutral(gestures.update(sample: indexOnlyPinch, at: 0.21, hand: 0)),
                "Reacquired closed index cannot restart fire")
         expect(neutral(gestures.update(sample: indexOnlyPinch, at: 1, hand: 0)),
                "Held reacquisition stays unarmed despite unrelated open fingers")
@@ -109,7 +114,9 @@ struct HandGestureTests {
         let both = grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.36, hand: 0)
         expect(both.grip == 1 && both.trigger == 1, "Rearmed grip combines with index")
         let lostCurl = grip.update(sample: sample(index: 0.038, curl: nil), at: 0.37, hand: 0)
-        expect(lostCurl.grip == 0 && lostCurl.trigger == 1, "Lost curl releases grip only")
+        expect(lostCurl.grip == 1 && lostCurl.trigger == 1, "Briefly lost curl preserves an accepted grip")
+        expect(grip.update(sample: sample(index: 0.038, curl: nil), at: 0.481, hand: 0).grip == 0,
+               "Grip loss beyond 120 ms releases without affecting trigger")
         expect(grip.update(sample: sample(index: 0.038, curl: 0.95), at: 0.5, hand: 0).grip == 0,
                "Grip reacquisition while curled cannot restart a grab")
         _ = grip.update(sample: sample(index: 0.038), at: 0.6, hand: 0)
@@ -193,6 +200,42 @@ struct HandGestureTests {
                 }
             }
             expect(observed, "Quick index selection is visible at every tested 45 Hz polling phase")
+        }
+    }
+
+    private static func indexOcclusionGrace() {
+        var gestures = armed()
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.1, hand: 0)
+        expect(neutral(gestures.update(sample: sample(index: nil), at: 0.111, hand: 0)),
+               "An occluded candidate cannot become an accepted trigger")
+        expect(neutral(gestures.update(sample: sample(index: 0.038), at: 0.2, hand: 0)),
+               "A lost candidate must reopen before retrying")
+        _ = gestures.update(sample: sample(), at: 0.3, hand: 0)
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.4, hand: 0)
+        _ = gestures.update(sample: sample(index: 0.038), at: 0.422, hand: 0)
+        expect(gestures.update(sample: sample(index: nil), at: 0.48, hand: 0).trigger == 1,
+               "Accepted index survives 58 ms of own-joint occlusion")
+        expect(neutral(gestures.update(sample: nil, at: 0.481, hand: 0)),
+               "Whole-hand loss cancels index occlusion grace immediately")
+
+        // Contact may hide the fingertip immediately after acceptance. Test
+        // each 45 Hz guest phase against a 90 Hz producer through that loss.
+        for phase in 0..<20 {
+            var input = KleptonHandGestures()
+            var guestTime = Double(phase) / 20 / 45
+            var observed = false
+            var output = KleptonGestureOutput.neutral
+            for frame in 0..<30 {
+                let time = Double(frame) / 90
+                let distance: Float? = time < 0.1 ? 0.08 : (time < 0.13 ? 0.038 : nil)
+                output = input.update(sample: sample(index: distance), at: time, hand: 0)
+                while guestTime < time + 1 / 90.0 {
+                    if output.trigger == 1 { observed = true }
+                    guestTime += 1 / 45.0
+                }
+            }
+            expect(observed, "An accepted pinch remains visible to every tested guest phase during contact occlusion")
+            expect(neutral(output), "Sustained fingertip occlusion cannot leave fire stuck")
         }
     }
 
@@ -311,6 +354,88 @@ struct HandGestureTests {
         expect(output.trigger == 1 && output.grip == 1, "Grip has independent hysteresis")
         output = gestures.update(sample: sample(index: 0.028, curl: 0.5), at: 0.3, hand: 0)
         expect(output.trigger == 1 && output.grip == 0, "Relaxing grip leaves trigger held")
+    }
+
+    private static func gripEvidenceAndOcclusion() {
+        func geometry(_ middle: Float?, _ ring: Float?, _ little: Float?) -> KleptonGestureSample {
+            .fromFingertips(thumb: .zero, index: SIMD3(0.08, 0, 0),
+                            middle: SIMD3(0.08, 0, 0), ring: nil, little: nil,
+                            middleCurl: middle, ringCurl: ring, littleCurl: little,
+                            position: .zero, stickRight: SIMD3(1, 0, 0), stickForward: SIMD3(0, 0, -1))
+        }
+        expect(geometry(0.9, 0.85, nil).gripCurl == 0.85,
+               "Two tracked curled fingers supply grip evidence without the third")
+        expect(geometry(0.9, 0.85, 0.1).gripCurl == 0.85,
+               "One outlier cannot override two agreeing curled fingers")
+        expect(geometry(0.9, 0.1, 0.2).gripCurl == 0.2,
+               "Two relaxed fingers release despite one curled outlier")
+        expect(geometry(0.9, nil, nil).gripCurl == nil,
+               "A single tracked finger cannot assert either grip state")
+        expect(geometry(0.9, 0.1, nil).gripCurl == 0.1,
+               "Two disagreeing tracked fingers cannot start a grip")
+        expect(geometry(0.9, .nan, nil).gripCurl == nil,
+               "Invalid curl cannot count as a second tracked finger")
+
+        var gestures = KleptonHandGestures()
+        _ = gestures.update(sample: geometry(0, 0, nil), at: 0, hand: 0)
+        _ = gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.1, hand: 0)
+        expect(gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.16, hand: 0).grip == 1,
+               "Two-finger geometry can acquire a debounced grip")
+        expect(gestures.update(sample: geometry(0.9, nil, nil), at: 0.279, hand: 0).grip == 1,
+               "Active grip survives 119 ms with insufficient individual-joint evidence")
+        expect(gestures.update(sample: geometry(0.9, nil, 0.85), at: 0.28, hand: 0).grip == 1,
+               "Timely two-finger recovery preserves the same held grab")
+        expect(gestures.update(sample: geometry(0.9, nil, nil), at: 0.401, hand: 0).grip == 0,
+               "Occlusion beyond 120 ms releases grip")
+        expect(gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.42, hand: 0).grip == 0,
+               "Expired occlusion requires tracked relaxation before another grab")
+        _ = gestures.update(sample: geometry(0, 0, nil), at: 0.5, hand: 0)
+        _ = gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.6, hand: 0)
+        _ = gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.66, hand: 0)
+        expect(gestures.update(sample: geometry(0.1, 0.2, 0.9), at: 0.67, hand: 0).grip == 0,
+               "Known relaxation releases immediately, without occlusion grace")
+        _ = gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.7, hand: 0)
+        _ = gestures.update(sample: geometry(0.9, 0.85, nil), at: 0.76, hand: 0)
+        expect(neutral(gestures.update(sample: nil, at: 0.77, hand: 0)),
+               "True whole-hand loss always releases grip immediately")
+    }
+
+    private static func heldGripOwnsCurledFingers() {
+        for finger in 0..<3 {
+            var gestures = armed()
+            _ = gestures.update(sample: sample(curl: 0.9), at: 0.1, hand: 0)
+            _ = gestures.update(sample: sample(curl: 0.9), at: 0.16, hand: 0)
+            var brush = sample(middle: finger == 0 ? 0.01 : 0.08,
+                               ring: finger == 1 ? 0.01 : 0.08,
+                               little: finger == 2 ? 0.01 : 0.08, curl: 0.9,
+                               position: SIMD3(0.08, 0, 0))
+            _ = gestures.update(sample: brush, at: 0.2, hand: 0)
+            var output = gestures.update(sample: brush, at: 1.1, hand: 0)
+            expect(output.grip == 1 && output.stick == .zero && !output.primary && !output.menu,
+                   "Non-index thumb contact cannot steal an active grab")
+            brush.gripCurl = nil
+            expect(gestures.update(sample: brush, at: 1.2, hand: 0).grip == 1,
+                   "Incidental pinch cannot cancel the short grip-occlusion grace")
+            brush.gripCurl = 0
+            expect(neutral(gestures.update(sample: brush, at: 1.21, hand: 0)),
+                   "Relaxing grip does not turn the same thumb contact into another action")
+            expect(neutral(gestures.update(sample: brush, at: 1.3, hand: 0)),
+                   "The brushed finger must reopen before deliberate navigation or face input")
+            _ = gestures.update(sample: sample(), at: 1.4, hand: 0)
+            _ = gestures.update(sample: brush, at: 1.5, hand: 0)
+            _ = gestures.update(sample: brush, at: 1.56, hand: 0)
+            brush.position.x += 0.08
+            output = gestures.update(sample: brush, at: 2.31, hand: 0)
+            expect(finger == 0 ? output.stick.x > 0.99 : (finger == 1 ? output.primary : output.menu),
+                   "After reopening, the same finger can still perform its normal action")
+        }
+        var gestures = armed()
+        _ = gestures.update(sample: sample(curl: 0.9), at: 0.1, hand: 0)
+        _ = gestures.update(sample: sample(curl: 0.9), at: 0.16, hand: 0)
+        _ = gestures.update(sample: sample(index: 0.01, curl: 0.9), at: 0.2, hand: 0)
+        let output = gestures.update(sample: sample(index: 0.01, curl: 0.9), at: 0.222, hand: 0)
+        expect(output.grip == 1 && output.trigger == 1,
+               "Protecting a held grab still permits deliberate index trigger")
     }
 
     private static func navigationDoesNotGrab() {
@@ -496,6 +621,15 @@ struct HandGestureTests {
                    "Invalid index or whole pose immediately clears trigger")
             expect(neutral(gestures.update(sample: sample(index: 0.01), at: 0.3, hand: 0)),
                    "Invalid index or pose requires index neutral reacquisition")
+        }
+        for curl in [Float.nan, Float.infinity, -0.01, 1.1] {
+            var grip = armed()
+            _ = grip.update(sample: sample(curl: 0.9), at: 0.1, hand: 0)
+            _ = grip.update(sample: sample(curl: 0.9), at: 0.16, hand: 0)
+            expect(neutral(grip.update(sample: sample(curl: curl), at: 0.17, hand: 0)),
+                   "Invalid curl releases immediately instead of receiving unknown-joint grace")
+            expect(neutral(grip.update(sample: sample(curl: 0.9), at: 0.2, hand: 0)),
+                   "Invalid curl requires a tracked relaxation before another grab")
         }
         let unrelated = [sample(index: 0.038, ring: 0.6), sample(index: 0.038, curl: Float.infinity),
                          sample(index: 0.038, curl: 1.1), sample(index: 0.038, right: .zero),

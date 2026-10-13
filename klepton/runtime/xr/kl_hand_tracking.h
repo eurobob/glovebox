@@ -1,6 +1,7 @@
 // Native hand skeleton shared by the visionOS frontend and the OpenVR shim.
 #ifndef KL_HAND_TRACKING_H
 #define KL_HAND_TRACKING_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,6 +13,9 @@ extern "C" {
 // Mode changes invalidate both hands. Hand: 0 = left, 1 = right.
 void kl_hand_tracking_set_enabled(int enabled);
 int kl_hand_tracking_enabled(void);
+uint64_t kl_hand_tracking_generation(void);
+void kl_hand_tracking_set_palm_valid(int hand, int valid);
+int kl_hand_tracking_palm_valid(int hand);
 
 // Valve's 31 bones in parent space, seven floats each: xyz, quaternion xyzw.
 // Curls (thumb through little finger) and adjacent-finger splays are 0..1.

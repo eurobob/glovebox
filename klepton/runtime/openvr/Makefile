@@ -25,8 +25,10 @@ ifeq ($(shell uname -s),Darwin)
 # needs its unresolved weak import explicitly allowed, and uses @loader_path.
 HOST_LINK_FLAGS = -Wl,-U,_kl_fault_print_frames -Wl,-install_name,@rpath/libklvr_openvr_null.so
 HOST_RPATH = @loader_path
+PLATFORM_TEST_LINK_FLAGS = -Wl,-dead_strip
 else
 HOST_RPATH = $$ORIGIN
+PLATFORM_TEST_LINK_FLAGS = -Wl,--gc-sections
 endif
 
 all: build/libklvr_openvr_null.so build/test_shim
@@ -49,9 +51,16 @@ build/test_hand_tracking: tests/test_hand_tracking.c ../xr/kl_hand_tracking.c ..
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_hand_tracking.c ../xr/kl_hand_tracking.c -lpthread -lm
 
-test: build/test_shim build/test_hand_tracking
+build/test_hand_platform: tests/test_hand_platform.c platform/klvr_platform_klepton.c src/klvr_platform.h ../xr/kl_ovrp.h ../gfx/kl_vulkan.h ../xr/kl_hand_tracking.c ../xr/kl_hand_tracking.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Isrc -I../xr -I../gfx -o $@ \
+		tests/test_hand_platform.c platform/klvr_platform_klepton.c ../xr/kl_hand_tracking.c \
+		$(PLATFORM_TEST_LINK_FLAGS) -lpthread -lm
+
+test: build/test_shim build/test_hand_tracking build/test_hand_platform
 	cd tests && ../build/test_shim
 	./build/test_hand_tracking
+	./build/test_hand_platform
 
 regen:
 	python3 tools/gen_vtables.py $(OPENVR_REPO)

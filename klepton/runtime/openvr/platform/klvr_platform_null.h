@@ -14,6 +14,7 @@ typedef struct {
     klvr_tracked    hand[2];
     klvr_controller ctl[2];
     int             hand_tracking_enabled;
+    uint64_t        hand_tracking_generation;
     struct {
         int valid;
         double time;

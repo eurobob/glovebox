@@ -1,4 +1,6 @@
+#if os(visionOS)
 import ARKit
+#endif
 import Foundation
 import simd
 
@@ -13,6 +15,56 @@ enum KleptonHandInput {
         #endif
     }
 
+    /// Run after kl_app_configure selects the normal gameinit script, before the guest starts.
+    /// Gestures use a head-relative stick. Alyx's hand-oriented mode would rotate it again,
+    /// potentially reversing strafe when the pinching palm faces back toward the player.
+    static func configureLocomotion() {
+        guard enabled else { return }
+        let original = getenv("KL_LUA_INJECT").map { String(cString: $0) }
+        do {
+            let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            if let prepared = try prepareLocomotionInjection(original, cacheDirectory: cache, hands: true),
+               prepared != original {
+                setenv("KL_LUA_INJECT", prepared, 1)
+                NSLog("[hands] Head-oriented locomotion hook prepared; saved movement preference kept")
+            }
+        } catch {
+            // Preserve the original hook on failure; do not turn a movement correction into a boot failure.
+            NSLog("[hands] Could not prepare locomotion hook: %@", error.localizedDescription)
+        }
+    }
+
+    /// Preserve the configured script and append a live-player override. In the shipped Valve
+    /// libserver, vr_movetype_set 2 sets MOVETYPE_VR_CONTINUOUS_HEAD (14), then audio opvars;
+    /// it does not write hlvr_movetype_default. Apply after every spawn/load, since personal.cfg
+    /// can restore the player's hand-oriented preference. Sense never installs this override.
+    static func prepareLocomotionInjection(_ specification: String?, cacheDirectory: URL,
+                                            hands: Bool) throws -> String? {
+        guard hands, let specification else { return specification }
+        let parts = specification.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, ["game/gameinit", "game/gameinit.lua"].contains(String(parts[0])),
+              parts[1].hasPrefix("/") else { return specification }
+        let original = try String(contentsOfFile: String(parts[1]), encoding: .utf8)
+        let destination = cacheDirectory.appendingPathComponent("alyx-hands-gameinit.lua")
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try (original + "\n" + locomotionScript).write(to: destination, atomically: true, encoding: .utf8)
+        return "\(parts[0])=\(destination.path)"
+    }
+
+    private static let locomotionScript = """
+    -- Native-hand input is head-relative; change the live player, not saved options.
+    ListenToGameEvent("player_activate", function()
+      local world = Entities:First()
+      if not world then return end
+      world:SetThink(function()
+        SendToServerConsole("vr_movetype_set 2")
+        Msg("[hands] Head-oriented locomotion; saved movement=" .. tostring(Convars:GetStr("hlvr_movetype_default")) .. "\\n")
+        return nil
+      end, "klepton_hand_locomotion", 0.1)
+    end, nil)
+    """
+
+    #if os(visionOS)
     static func sample(_ anchor: HandAnchor, head: simd_float4x4?) -> KleptonGestureSample? {
         guard anchor.isTracked else { return nil }
         let p = anchor.originFromAnchorTransform.columns.3
@@ -49,4 +101,5 @@ enum KleptonHandInput {
             middleCurl: mc, ringCurl: rc, littleCurl: lc, position: position,
             stickRight: right, stickForward: forward)
     }
+    #endif
 }

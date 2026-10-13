@@ -418,6 +418,9 @@ final class KleptonControllers {
     private var trackedHands = [KleptonTrackedHand(), KleptonTrackedHand()]
     private var gestureFrames = 0
     private var gesturePoseFrames = [0, 0]
+    private var gestureMissingFrames = [0, 0]
+    private var gestureUntrackedFrames = [0, 0]
+    private var gestureInvalidFrames = [0, 0]
     private var gestureIndexFrames = [0, 0]
     private var gesturePressFrames = [0, 0]
     private var gestureClosest: [Float] = [.infinity, .infinity]
@@ -1875,6 +1878,9 @@ final class KleptonControllers {
     }
 
     private func releaseGestureHand(_ hand: Int, at time: TimeInterval) {
+        // The legacy pose seam retains its last publication indefinitely.
+        // Invalidate palm availability independently of finger skeleton data.
+        kl_hand_tracking_set_palm_valid(Int32(hand), 0)
         handMotion[hand].reset()
         trackedHands[hand].reset(hand: hand)
         _ = handGestures[hand].update(sample: nil, at: time, hand: hand)
@@ -1907,10 +1913,14 @@ final class KleptonControllers {
             let sample = anchor.flatMap { KleptonHandInput.sample($0, head: head) }
             let output = handGestures[hand].update(sample: sample, at: time, hand: hand)
             guard sample != nil, let anchor else {
+                if anchor == nil { gestureMissingFrames[hand] += 1 }
+                else if anchor?.isTracked == false { gestureUntrackedFrames[hand] += 1 }
+                else { gestureInvalidFrames[hand] += 1 }
                 releaseGestureHand(hand, at: time)
                 continue
             }
             guard let pose = trackedHands[hand].update(anchor, hand: hand, at: time) else {
+                gestureInvalidFrames[hand] += 1
                 releaseGestureHand(hand, at: time)
                 continue
             }
@@ -1918,6 +1928,7 @@ final class KleptonControllers {
             guard p.x.isFinite, p.y.isFinite, p.z.isFinite,
                   q.vector.x.isFinite, q.vector.y.isFinite,
                   q.vector.z.isFinite, q.vector.w.isFinite else {
+                gestureInvalidFrames[hand] += 1
                 releaseGestureHand(hand, at: time)
                 continue
             }
@@ -1947,6 +1958,9 @@ final class KleptonControllers {
                 motion.angular.x, motion.angular.y, motion.angular.z)
             kl_ovrp_set_controller_input(Int32(hand), st.buttons, st.touches,
                 st.indexTrigger, st.handTrigger, st.stick.x, st.stick.y)
+            // Publish availability after this frame's valid palm and controls.
+            // Missing finger joints may clear bones without invalidating this.
+            kl_hand_tracking_set_palm_valid(Int32(hand), 1)
             lock.lock(); state[hand] = st; lock.unlock()
         }
         reportGestureHands()
@@ -1963,11 +1977,12 @@ final class KleptonControllers {
         func summary(_ hand: Int) -> String {
             let closest = gestureClosest[hand].isFinite
                 ? String(format: "%.1f mm", gestureClosest[hand] * 1000) : "untracked"
-            return "pose \(gesturePoseFrames[hand]), index \(gestureIndexFrames[hand]), trigger \(gesturePressFrames[hand]), closest \(closest)"
+            return "pose \(gesturePoseFrames[hand]), missing \(gestureMissingFrames[hand]), ARKit-untracked \(gestureUntrackedFrames[hand]), invalid \(gestureInvalidFrames[hand]), index \(gestureIndexFrames[hand]), trigger \(gesturePressFrames[hand]), closest \(closest)"
         }
         NSLog("[hands] %d frames: L %@ | R %@", gestureFrames, summary(0), summary(1))
         gestureFrames = 0
         gesturePoseFrames = [0, 0]; gestureIndexFrames = [0, 0]
+        gestureMissingFrames = [0, 0]; gestureUntrackedFrames = [0, 0]; gestureInvalidFrames = [0, 0]
         gesturePressFrames = [0, 0]; gestureClosest = [.infinity, .infinity]
     }
 }

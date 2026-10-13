@@ -14,6 +14,8 @@
     { "name": "/actions/default/in/Teleport", "type": "boolean" },
     { "name": "/actions/default/in/Grab", "type": "boolean" },
     { "name": "/actions/default/in/HandPose", "type": "pose" },
+    { "name": "/actions/default/in/TipPose", "type": "pose" },
+    { "name": "/actions/default/in/GripPose", "type": "pose" },
     { "name": "/actions/default/in/SkeletonLeft", "type": "skeleton", "skeleton": "/skeleton/hand/left" },
     { "name": "/actions/default/in/SkeletonRight", "type": "skeleton", "skeleton": "/skeleton/hand/right" },
     { "name": "/actions/default/out/Haptic", "type": "vibration" },

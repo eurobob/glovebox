@@ -610,6 +610,10 @@ struct BootView: View {
                 return
             }
 
+            #if KL_ALYX_LAUNCHER
+            KleptonHandInput.configureLocomotion()
+            #endif
+
             // The target is resolved now, so the immersion default (which depends
             // on it — the native VR kind opens .full) is finally knowable. Publish
             // it on the main actor before the space opens; the scene observes it.

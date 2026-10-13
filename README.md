@@ -9,8 +9,9 @@ installs it on your headset.
 This fork is based on **upstream Glovebox 0.1.5** and adds **experimental hand controls** alongside
 PS VR2 Sense. Choose **Hands (Experimental)** or **PS VR2 Sense** in the headset launcher; Hands is the default.
 Individual finger articulation works, but headset playtests still show substantial hand rotation and
-position errors. Build 1013.2.2 tests a reference-pose correction based on the game's actual hand queries;
-reliable hand alignment is not yet confirmed. Returning players get Play immediately from their completed
+position errors. The current candidate replaces the unsuccessful reference-only correction with a shared
+placement transform for raw poses and the live skeleton; reliable alignment still needs a headset playtest.
+Returning players get Play immediately from their completed
 local installation, with routine Steam checks in the background.
 Upstream Glovebox remains Sense-only.
 [Hand controls and custom build instructions](docs/HAND-CONTROLS.md).
@@ -60,8 +61,8 @@ Steam's copy of Half-Life: Alyx includes a native 64-bit ARM Linux build. [Klept
 converts its libraries into signed Vision Pro code on your Mac, and runs the game against Apple's frameworks:
 Vulkan through MoltenVK, the displays through Compositor Services, the Sense controllers through Game Controller
 and ARKit. This fork also maps ARKit hand gestures to the game's controller inputs. It uses the ARM64 Linux
-build, with no Wine dependency. The game's graphics pipelines are rebuilt from your own copy and compiled ahead of time, so shader
-compiling stays out of play. The whole story: [How it works](docs/HOW-IT-WORKS.md).
+build, with no Wine dependency. The fork reuses the persistent Metal shader cache and compiles missing
+pipelines on demand, avoiding an exhaustive replay at every startup. The whole story: [How it works](docs/HOW-IT-WORKS.md).
 
 Questions: [FAQ](docs/FAQ.md) · Problems: [Known issues](docs/KNOWN-ISSUES.md)
 

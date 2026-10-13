@@ -828,11 +828,17 @@ static vr::EVRInputError pose_at(vr::VRActionHandle_t h, vr::ETrackingUniverseOr
     klvr_controller c{};
     klvr_plat_controller(hand, &c);
     klvr_tracked g{};
-    klvr_plat_hand(hand, t, &g);
     Pose off;
-    if (klvr_plat_hand_tracking_enabled() || pose == "grip" || pose == "handgrip")
-        off = { { 0, 0, 0 }, { 0, 0, 0, 1 } };
-    else off = pmul(raw_from_grip(hand), component_offset(pose));
+    if (klvr_plat_hand_tracking_enabled()) {
+        const auto native = native_hand(hand, t);
+        g = native.palm;
+        const bool anatomical = pose == "tip" || pose == "aim" || pose == "grip" || pose == "handgrip";
+        off = anatomical ? Pose{{0, 0, 0}, {0, 0, 0, 1}} : native.raw_from_palm;
+    } else {
+        klvr_plat_hand(hand, t, &g);
+        off = pose == "grip" || pose == "handgrip" ? Pose{{0, 0, 0}, {0, 0, 0, 1}}
+            : pmul(raw_from_grip(hand), component_offset(pose));
+    }
     fill_pose(&out->pose, g, u, &off);
     out->pose.bDeviceIsConnected = c.connected;
     out->bActive = c.connected;
@@ -895,7 +901,7 @@ vr::EVRInputError IVRInput__GetSkeletalActionData(void *, vr::VRActionHandle_t h
     if (e) return e;
     klvr_controller c{};
     klvr_plat_controller(hand, &c);
-    out->bActive = klvr_plat_hand_tracking_enabled() ? klvr_plat_skeleton(hand, nullptr, nullptr, nullptr) : c.connected;
+    out->bActive = klvr_plat_hand_tracking_enabled() ? native_hand(hand, klvr_plat_now()).skeleton_valid : c.connected;
     out->activeOrigin = hand ? kRight : kLeft;
     return vr::VRInputError_None;
 }
@@ -948,8 +954,7 @@ vr::EVRInputError IVRInput__GetSkeletalReferenceTransforms(void *, vr::VRActionH
     if (e == vr::VRInputError_NoData) hand = 0;
     else if (e) return e;
     vr::VRBoneTransform_t xf[kBoneCount];
-    if (klvr_plat_hand_tracking_enabled()) skel_reference_anatomical(hand, which, xf);
-    else skel_reference(hand, which, xf);
+    skel_reference(hand, which, xf);
     to_space(space, xf);
     memcpy(out, xf, sizeof xf);
     static std::atomic<uint32_t> seen{0};
@@ -992,13 +997,9 @@ vr::EVRInputError IVRInput__GetSkeletalBoneData(void *, vr::VRActionHandle_t h, 
     if (e) return e;
     vr::VRBoneTransform_t xf[kBoneCount];
     if (klvr_plat_hand_tracking_enabled()) {
-        float bones[kBoneCount * 7];
-        if (!klvr_plat_skeleton(hand, bones, nullptr, nullptr)) return vr::VRInputError_NoData;
-        for (int i = 0; i < kBoneCount; i++) {
-            const float *b = bones + i * 7;
-            xf[i].position = {{ b[0], b[1], b[2], 1 }};
-            xf[i].orientation = { b[6], b[3], b[4], b[5] };
-        }
+        const auto native = native_hand(hand, klvr_plat_now());
+        if (!native.skeleton_valid) return vr::VRInputError_NoData;
+        memcpy(xf, native.bones, sizeof xf);
     } else {
         klvr_controller c{};
         klvr_plat_controller(hand, &c);
@@ -1030,9 +1031,13 @@ vr::EVRInputError IVRInput__GetSkeletalSummaryData(void *, vr::VRActionHandle_t 
     int hand;
     vr::EVRInputError e = skeleton_hand(h, hand);
     if (e) return e;
-    if (klvr_plat_hand_tracking_enabled())
-        return klvr_plat_skeleton(hand, nullptr, out->flFingerCurl, out->flFingerSplay) ?
-            vr::VRInputError_None : vr::VRInputError_NoData;
+    if (klvr_plat_hand_tracking_enabled()) {
+        const auto native = native_hand(hand, klvr_plat_now());
+        if (!native.skeleton_valid) return vr::VRInputError_NoData;
+        memcpy(out->flFingerCurl, native.curl, sizeof native.curl);
+        memcpy(out->flFingerSplay, native.splay, sizeof native.splay);
+        return vr::VRInputError_None;
+    }
     klvr_controller c{};
     klvr_plat_controller(hand, &c);
     curls_from(c, out->flFingerCurl);
